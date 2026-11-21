@@ -1,5 +1,10 @@
 packages: .
 
--- The library this one is built on, when it is checked out next to it.
-optional-packages:
-  ../streamly-http
+-- The libraries this package is built on are not on Hackage yet: they are
+-- fetched from GitHub, each at its release. To build against copies checked
+-- out next to this repository instead, see cabal.project.siblings.
+
+source-repository-package
+  type: git
+  location: https://github.com/GuillaumedeVolpiano/streamly-http
+  tag: v0.1.0.0

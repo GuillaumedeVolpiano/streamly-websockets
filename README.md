@@ -49,5 +49,6 @@ main = withConnection (config "127.0.0.1" 9330 "/api") $ \connection -> do
 
 ## Building
 
-streamly-http is not on Hackage yet: `cabal.project` picks it up when it is
-checked out next to this repository.
+streamly-http is not on Hackage yet: `cabal.project` fetches it
+from GitHub, at its release. To build against copies checked out next to
+this repository instead, pass `--project-file=cabal.project.siblings`.

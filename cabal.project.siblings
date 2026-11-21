@@ -1,0 +1,7 @@
+-- For working on this package and the libraries it is built on at the same
+-- time: cabal build --project-file=cabal.project.siblings
+packages: .
+
+-- The library this one is built on, when it is checked out next to it.
+optional-packages:
+  ../streamly-http

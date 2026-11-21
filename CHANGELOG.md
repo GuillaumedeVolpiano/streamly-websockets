@@ -1,6 +1,6 @@
 # Revision history for streamly-websockets
 
-## 0.1.0.0 -- unreleased
+## 0.1.0.0 -- 2026-11-21
 
 * A WebSocket client over TCP: `withConnection`, `send`, `receive`,
   `messages`, `ping`, `pongCount`, `close`; `withConnectionOver` for a
