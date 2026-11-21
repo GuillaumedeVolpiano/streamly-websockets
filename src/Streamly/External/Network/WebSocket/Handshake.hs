@@ -3,13 +3,19 @@
 -- Description : The HTTP exchange that opens a WebSocket
 -- License     : BSD-3-Clause
 --
--- The opening handshake of RFC 6455, section 4, seen from the client: an
--- HTTP request that asks for the upgrade, and the check of the answer.
+-- The opening handshake of RFC 6455, section 4. From the client: an HTTP
+-- request that asks for the upgrade, and the check of the answer. From the
+-- server: the check of the request, and the answer.
 module Streamly.External.Network.WebSocket.Handshake
   ( newKey
   , acceptFor
   , upgradeRequest
   , checkUpgrade
+
+    -- * The side of a server
+  , checkUpgradeRequest
+  , upgradeResponse
+  , refusal
   ) where
 
 import Control.Monad (unless, when)
@@ -20,7 +26,7 @@ import Data.ByteString.Base64 qualified as Base64
 import Data.ByteString.Char8 qualified as BS8
 import Data.Char (toLower)
 import Data.Maybe (isJust)
-import Streamly.External.Network.HTTP.Wire (Header, Request (..), RequestBody (..), Response (..), header)
+import Streamly.External.Network.HTTP.Wire (Header, Request (..), RequestBody (..), RequestHead, Response (..), header, requestHeader, requestMethod)
 import Streamly.External.Network.WebSocket.Frame (WebSocketError (..))
 import System.Entropy (getEntropy)
 
@@ -70,3 +76,28 @@ checkUpgrade key response = do
     refuse = Left . HandshakeFailed
     lower = BS8.map toLower
     tokens = map (lower . BS8.strip) . BS.split 44
+
+-- | Check that a request asks properly for a WebSocket, and give its key:
+-- a @GET@ that upgrades to @websocket@, version 13, with a key.
+checkUpgradeRequest :: RequestHead -> Either WebSocketError ByteString
+checkUpgradeRequest request = do
+  unless (requestMethod request == "GET") (refuse "the request is not a GET")
+  unless (fmap lower (requestHeader "upgrade" request) == Just "websocket") (refuse "the request does not ask for websocket")
+  unless (maybe False (elem "upgrade" . tokens) (requestHeader "connection" request)) (refuse "the request does not say Connection: Upgrade")
+  unless (fmap BS8.strip (requestHeader "sec-websocket-version" request) == Just "13") (refuse "the request is not for version 13")
+  case requestHeader "sec-websocket-key" request of
+    Just key | not (BS.null key) -> Right key
+    _ -> refuse "the request has no key"
+  where
+    refuse = Left . HandshakeFailed
+    lower = BS8.map toLower
+    tokens = map (lower . BS8.strip) . BS.split 44
+
+-- | The answer that accepts the upgrade asked with a key.
+upgradeResponse :: ByteString -> ByteString
+upgradeResponse key =
+  "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " <> acceptFor key <> "\r\n\r\n"
+
+-- | The answer to a request that does not ask properly for a WebSocket.
+refusal :: ByteString
+refusal = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nSec-WebSocket-Version: 13\r\nContent-Length: 0\r\n\r\n"

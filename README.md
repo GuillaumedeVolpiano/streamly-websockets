@@ -1,11 +1,13 @@
 # streamly-websockets
 
-A WebSocket client (RFC 6455) written with
-[Streamly](https://streamly.composewell.com/), over plain TCP. The opening
-handshake goes through
+WebSockets (RFC 6455) written with
+[Streamly](https://streamly.composewell.com/), over plain TCP, for clients
+and for servers. The opening handshake goes through
 [streamly-http](https://github.com/GuillaumedeVolpiano/streamly-http);
 frames are read with Streamly parsers from the stream of byte arrays of the
 connection; the messages received are a stream.
+
+A client:
 
 ```haskell
 {-# LANGUAGE OverloadedStrings #-}
@@ -20,11 +22,25 @@ main = withConnection (config "127.0.0.1" 9330 "/api") $ \connection -> do
   Stream.fold (Fold.drainMapM print) (Stream.take 3 (messages connection))
 ```
 
+A server that sends back what it receives:
+
+```haskell
+{-# LANGUAGE OverloadedStrings #-}
+
+import Streamly.Data.Fold qualified as Fold
+import Streamly.Data.Stream qualified as Stream
+import Streamly.External.Network.WebSocket.Server
+
+main :: IO ()
+main = serve "127.0.0.1" 8080 defaultServerOptions $ \_ connection ->
+  Stream.fold (Fold.drainMapM (send connection)) (messages connection)
+```
+
 ## What it does
 
 - Text and binary messages, sent in one frame each, received whole even
-  when the server fragments them. Text is checked to be UTF-8.
-- Pings of the server are answered, the pongs to `ping` counted
+  when the other side fragments them. Text is checked to be UTF-8.
+- Pings of the other side are answered, the pongs to `ping` counted
   (`pongCount`, in `STM`), and the closing handshake is done, all while
   messages are received.
 - Sending is safe from several threads. Receiving is for one thread at a
@@ -35,12 +51,13 @@ main = withConnection (config "127.0.0.1" 9330 "/api") $ \connection -> do
 ## Modules
 
 - `Streamly.External.Network.WebSocket`: the client.
+- `Streamly.External.Network.WebSocket.Server`: the server. Each client is
+  served in a thread of its own; every upgrade asked properly is accepted.
 - `Streamly.External.Network.WebSocket.Frame`: frames, written and read.
 - `Streamly.External.Network.WebSocket.Handshake`: the opening handshake.
 
 ## Limits of this version
 
-- A client only: no server side.
 - TLS is not built in. `withConnectionOver` takes a connection opened by
   other means, as a `Transport` of streamly-http: one of
   [streamly-network-tls](https://github.com/GuillaumedeVolpiano/streamly-network-tls)

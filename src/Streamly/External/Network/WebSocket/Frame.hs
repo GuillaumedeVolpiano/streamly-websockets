@@ -4,7 +4,7 @@
 -- License     : BSD-3-Clause
 --
 -- The frames of RFC 6455, section 5: writing them, masked or not, and
--- reading those of a server from a stream of byte arrays.
+-- reading them from a stream of byte arrays, on either side.
 module Streamly.External.Network.WebSocket.Frame
   ( -- * Frames
     Frame (..)
@@ -14,6 +14,7 @@ module Streamly.External.Network.WebSocket.Frame
   , applyMask
 
     -- * Reading
+  , Side (..)
   , FrameHeader (..)
   , frameHeader
   , readFrame
@@ -65,9 +66,10 @@ data Frame = Frame
 -- | What can go wrong on a WebSocket connection. Failures of the TCP
 -- connection itself stay 'IOError's.
 data WebSocketError
-  = -- | The server did not accept the upgrade to WebSocket: why.
+  = -- | The opening handshake failed: the server did not accept the upgrade
+    -- or, for a server, the client did not ask for one properly. Why.
     HandshakeFailed String
-  | -- | The server broke the protocol: how.
+  | -- | The other side broke the protocol: how.
     ProtocolViolation String
   | -- | A frame or a message larger than the limit of the connection, in
     -- bytes: the limit.
@@ -164,29 +166,41 @@ frameHeader = do
     bigEndian :: Monad m => Int -> Parser Word8 m Word64
     bigEndian count = foldl' (\total byte -> total * 256 + fromIntegral byte) 0 <$> Parser.takeEQ count Fold.toList
 
--- | Read one frame sent by a server, given the largest payload accepted,
--- and give the input that follows it. 'Nothing' when the input has ended
--- before the frame starts.
+-- | The two ends of a connection. A client masks the frames it sends; a
+-- server does not.
+data Side = Client | Server
+  deriving stock (Eq, Show)
+
+-- | Read one frame as the given side receives it, with the largest payload
+-- accepted, and give the input that follows it. 'Nothing' when the input
+-- has ended before the frame starts. A payload masked by a client is
+-- given unmasked.
 --
--- Throws 'ProtocolViolation' for a header that cannot be read, a masked
--- frame (a server must not mask) and an input that ends inside the frame;
--- 'MessageTooLarge' for a payload beyond the limit.
-readFrame :: Int -> StreamK IO (Array Word8) -> IO (Maybe (Frame, StreamK IO (Array Word8)))
-readFrame limit input =
+-- Throws 'ProtocolViolation' for a header that cannot be read, for a
+-- frame masked when it must not be (those a client receives) or not
+-- masked when it must be (those a server receives), and for an input that
+-- ends inside the frame; 'MessageTooLarge' for a payload beyond the limit.
+readFrame :: Side -> Int -> StreamK IO (Array Word8) -> IO (Maybe (Frame, StreamK IO (Array Word8)))
+readFrame side limit input =
   StreamK.uncons input >>= \case
     Nothing -> pure Nothing
     Just (array, rest)
-      | Array.length array == 0 -> readFrame limit rest
+      | Array.length array == 0 -> readFrame side limit rest
       | otherwise -> do
           (outcome, afterHeader) <- Array.parseBreak (Array.toParserK frameHeader) (StreamK.cons array rest)
           found <- case outcome of
             Left (Parser.ParseError problem) -> throwIO (ProtocolViolation problem)
             Right found -> pure found
-          when (found.mask /= Nothing) (throwIO (ProtocolViolation "a masked frame from the server"))
+          case (side, found.mask) of
+            (Client, Just _) -> throwIO (ProtocolViolation "a masked frame from the server")
+            (Server, Nothing) -> throwIO (ProtocolViolation "a frame from the client that is not masked")
+            _ -> pure ()
           when (found.size > limit) (throwIO (MessageTooLarge limit))
           takeBytes found.size afterHeader >>= \case
             Nothing -> throwIO (ProtocolViolation "the connection ended inside a frame")
-            Just (payload, afterFrame) -> pure (Just (Frame {final = found.final, opcode = found.opcode, payload}, afterFrame))
+            Just (received, afterFrame) ->
+              let payload = maybe received (`applyMask` received) found.mask
+               in pure (Just (Frame {final = found.final, opcode = found.opcode, payload}, afterFrame))
 
 -- | Take a number of bytes from the input, without copying the arrays
 -- that hold them. 'Nothing' when the input ends first.
