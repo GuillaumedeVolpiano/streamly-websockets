@@ -1,5 +1,11 @@
 # Revision history for streamly-websockets
 
+## 0.3.0.0 -- 2026-11-21
+
+* The header of a frame is a flatparse parser, run through
+  streamly-flatparse: `frameHeader` changes its type.
+* Built on streamly-http 0.3.
+
 ## 0.2.0.0 -- 2026-11-21
 
 * `openTimeout` in `Config`: thirty seconds by default for the TCP

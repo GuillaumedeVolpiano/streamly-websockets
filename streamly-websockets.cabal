@@ -1,6 +1,6 @@
 cabal-version:   3.12
 name:            streamly-websockets
-version:         0.2.0.0
+version:         0.3.0.0
 synopsis:        WebSocket clients and servers written with Streamly
 description:
   WebSockets (RFC 6455) over plain TCP, for clients and for servers. The
@@ -61,7 +61,7 @@ library
     , streamly-bytestring  ^>=0.2.3
     , streamly-core        ^>=0.3.3
     , streamly-flatparse   ^>=0.1
-    , streamly-http        ^>=0.2
+    , streamly-http        ^>=0.3
     , streamly-network-tcp ^>=0.1
     , text                 ^>=2.1
 
@@ -79,7 +79,7 @@ test-suite streamly-websockets-test
     , stm                  ^>=2.5
     , streamly-bytestring  ^>=0.2.3
     , streamly-core        ^>=0.3.3
-    , streamly-http        ^>=0.2
+    , streamly-http        ^>=0.3
     , streamly-websockets
     , tasty                ^>=1.5
     , tasty-hunit          ^>=0.10

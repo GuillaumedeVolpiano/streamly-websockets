@@ -67,6 +67,6 @@ main = serve "127.0.0.1" 8080 defaultServerOptions $ \_ connection ->
 
 ## Building
 
-streamly-http is not on Hackage yet: `cabal.project` fetches it
-from GitHub, at its release. To build against copies checked out next to
+The libraries this package is built on are not on Hackage yet:
+`cabal.project` fetches them from GitHub, at their releases. To build against copies checked out next to
 this repository instead, pass `--project-file=cabal.project.siblings`.
