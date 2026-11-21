@@ -5,8 +5,8 @@
 * `openTimeout` in `Config`: thirty seconds by default for the TCP
   connection and the answer to the upgrade, `OpenTimedOut` beyond.
 * The side of a server: `Streamly.External.Network.WebSocket.Server`,
-  with `serve`, `listen`, `serveSocket` and `acceptOver`. A connection is
-  the same type on both sides.
+  with `serve`, `listen`, `serveSocket`, `serveSocketWith` and
+  `acceptOver`. A connection is the same type on both sides.
 * `readFrame` takes the side that reads: a server unmasks the frames of a
   client and refuses those that are not masked.
 * The answer to the upgrade is at most 64 KiB.

@@ -28,6 +28,7 @@ module Streamly.External.Network.WebSocket.Server
   , serve
   , listen
   , serveSocket
+  , serveSocketWith
   , acceptOver
 
     -- * Connections
@@ -111,14 +112,22 @@ listen host port = do
 -- when its handler returns or throws; what a handler throws, and a client
 -- whose request is refused, end that client only and are not reported.
 serveSocket :: Net.Socket -> ServerOptions -> (Upgrade -> Connection -> IO ()) -> IO ()
-serveSocket listener options handler = forever . mask_ $ do
+serveSocket listener options handler = serveSocketWith listener $ \peer ->
+  acceptOver (socketTransport peer) options handler
+
+-- | Like 'serveSocket', leaving to a function what is done with the TCP
+-- connection of each client: a server over TLS does its handshake there,
+-- then calls 'acceptOver' with the transport it got. The connection is
+-- closed when the function returns or throws.
+serveSocketWith :: Net.Socket -> (Net.Socket -> IO ()) -> IO ()
+serveSocketWith listener client = forever . mask_ $ do
   (peer, _) <- Net.accept listener
-  void (forkIOWithUnmask (\unmask -> void (try @SomeException (unmask (client peer))) `finally` Net.close peer))
+  void (forkIOWithUnmask (\unmask -> void (try @SomeException (unmask (served peer))) `finally` Net.close peer))
   where
-    client peer = do
+    served peer = do
       -- Frames are small and wait for answers: do not hold them back.
       Net.setSocketOption peer Net.NoDelay 1
-      acceptOver (socketTransport peer) options handler
+      client peer
 
 -- | Accept the upgrade asked on a connection that is already open, and
 -- use the WebSocket. When the function returns, the connection is closed

@@ -58,10 +58,10 @@ main = serve "127.0.0.1" 8080 defaultServerOptions $ \_ connection ->
 
 ## Limits of this version
 
-- TLS is not built in. `withConnectionOver` takes a connection opened by
-  other means, as a `Transport` of streamly-http: one of
-  [streamly-network-tls](https://github.com/GuillaumedeVolpiano/streamly-network-tls)
-  gives secure WebSockets (`wss://`).
+- TLS is not built in: `withConnectionOver` and `acceptOver` take a
+  connection opened by other means, as a `Transport` of streamly-http.
+  [streamly-websockets-tls](https://github.com/GuillaumedeVolpiano/streamly-websockets-tls)
+  does it for both sides: `wss://` URLs for clients, servers over TLS.
 - No extension (no compression) and no subprotocol negotiation.
 - Messages are sent in one frame; there is no streaming of a message.
 
