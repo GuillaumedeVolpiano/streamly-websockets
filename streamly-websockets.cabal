@@ -1,0 +1,82 @@
+cabal-version:   3.12
+name:            streamly-websockets
+version:         0.1.0.0
+synopsis:        A WebSocket client written with Streamly
+description:
+  A WebSocket client (RFC 6455) over plain TCP. The opening handshake goes
+  through streamly-http, frames are read with Streamly parsers from the
+  stream of byte arrays of the connection, and the messages received are a
+  stream. Pings are answered, fragmented messages put together, and the
+  closing handshake done. No TLS, no extension.
+
+homepage:        https://github.com/GuillaumedeVolpiano/streamly-websockets
+license:         BSD-3-Clause
+license-file:    LICENSE
+author:          GuillaumedeVolpiano
+maintainer:      xavier@wheredoibegin.fr
+category:        Network, Web, Streamly
+build-type:      Simple
+tested-with:     GHC ==9.12.4
+extra-doc-files:
+  CHANGELOG.md
+  README.md
+
+source-repository head
+  type:     git
+  location: https://github.com/GuillaumedeVolpiano/streamly-websockets.git
+
+common shared
+  default-language:   GHC2024
+  default-extensions:
+    DuplicateRecordFields
+    NoFieldSelectors
+    OverloadedRecordDot
+    OverloadedStrings
+
+  ghc-options:
+    -Wall -Wcompat -Wredundant-constraints -Wmissing-deriving-strategies
+    -Wunused-packages
+
+library
+  import:          shared
+  hs-source-dirs:  src
+  exposed-modules:
+    Streamly.External.Network.WebSocket
+    Streamly.External.Network.WebSocket.Frame
+    Streamly.External.Network.WebSocket.Handshake
+
+  build-depends:
+    , base                 ^>=4.21
+    , base64-bytestring    ^>=1.2
+    , bytestring           ^>=0.12
+    , cryptohash-sha1      ^>=0.11
+    , entropy              ^>=0.4
+    , network              ^>=3.2
+    , stm                  ^>=2.5
+    , streamly             ^>=0.11.1
+    , streamly-bytestring  ^>=0.2.3
+    , streamly-core        ^>=0.3.3
+    , streamly-http        ^>=0.1
+    , text                 ^>=2.1
+
+test-suite streamly-websockets-test
+  import:         shared
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        Main.hs
+  ghc-options:    -threaded
+  build-depends:
+    , async                ^>=2.2
+    , base                 ^>=4.21
+    , bytestring           ^>=0.12
+    , network              ^>=3.2
+    , stm                  ^>=2.5
+    , streamly-bytestring  ^>=0.2.3
+    , streamly-core        ^>=0.3.3
+    , streamly-http        ^>=0.1
+    , streamly-websockets
+    , tasty                ^>=1.5
+    , tasty-hunit          ^>=0.10
+    , tasty-quickcheck     ^>=0.11
+    , text                 ^>=2.1
+    , websockets           ^>=0.13
