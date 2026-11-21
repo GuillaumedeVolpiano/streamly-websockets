@@ -72,6 +72,9 @@ data WebSocketError
   | -- | A frame or a message larger than the limit of the connection, in
     -- bytes: the limit.
     MessageTooLarge Int
+  | -- | The connection was not open within the time allowed: the server
+    -- did not accept it, or did not answer the upgrade.
+    OpenTimedOut
   | -- | Sending on a connection that is closed or closing.
     ConnectionClosed
   deriving stock (Eq, Show)

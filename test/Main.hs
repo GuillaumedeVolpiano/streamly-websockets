@@ -3,6 +3,7 @@
 -- send chosen bytes.
 module Main (main) where
 
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (wait, withAsync)
 import Control.Concurrent.STM (atomically, check)
 import Control.Exception (bracket, try)
@@ -333,6 +334,12 @@ chosen =
             outcome @?= Left (MessageTooLarge 10)
       tooLarge [Frame True BinaryFrame "12345678901"]
       tooLarge [Frame False BinaryFrame "123456", Frame True Continuation "78901"]
+  , testCase "a server that accepts and never answers the upgrade" $
+      bracket listening Net.close $ \listener -> do
+        port <- Net.socketPort listener
+        let hold = bracket (fst <$> Net.accept listener) Net.close (\_ -> threadDelay 10_000_000)
+        withAsync hold $ \_ ->
+          try (withConnection (config "127.0.0.1" (fromIntegral port) "/") {openTimeout = Just 150_000} (\_ -> pure ())) >>= (@?= Left OpenTimedOut)
   , testCase "a path that cannot be written is refused before any connection" $
       try (withConnection (config "127.0.0.1" 1 "/a b") (\_ -> pure ())) >>= \case
         Left (InvalidRequest _) -> pure ()

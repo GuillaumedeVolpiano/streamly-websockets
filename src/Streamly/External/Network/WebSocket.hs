@@ -45,7 +45,7 @@ module Streamly.External.Network.WebSocket
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
 import Control.Concurrent.STM (STM, TVar, atomically, modifyTVar', newTVarIO, readTVar)
-import Control.Exception (SomeException, bracket, catch, onException, throwIO, try)
+import Control.Exception (SomeException, catch, finally, mask, onException, throwIO, try)
 import Control.Monad (unless, void, when)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -61,7 +61,7 @@ import Streamly.Data.Stream qualified as Stream
 import Streamly.Data.StreamK (StreamK)
 import Streamly.Data.StreamK qualified as StreamK
 import Streamly.External.ByteString qualified as StreamlyBS
-import Streamly.External.Network.HTTP (HttpError, Transport (..), connect, socketTransport)
+import Streamly.External.Network.HTTP (HttpError (..), Transport (..), connectWithin, socketTransport)
 import Streamly.External.Network.HTTP.Wire (Header, readResponseHead, renderRequest, validateRequest)
 import Streamly.External.Network.WebSocket.Frame
 import Streamly.External.Network.WebSocket.Handshake
@@ -79,6 +79,11 @@ data Config = Config
   , maxMessageSize :: Int
   -- ^ The largest message accepted, in bytes. A larger one closes the
   -- connection with 'MessageTooLarge'.
+  , openTimeout :: Maybe Int
+  -- ^ Microseconds allowed for the connection to open: the TCP connection
+  -- and the answer to the upgrade. 'Nothing' waits without end. Once the
+  -- connection is open nothing limits the waits: a silent WebSocket is a
+  -- normal one, and 'ping' with 'pongCount' tells a dead one.
   , closeTimeout :: Int
   -- ^ Microseconds to wait, once the function given to 'withConnection'
   -- is done, for the server to answer the closing of the connection.
@@ -86,9 +91,9 @@ data Config = Config
   deriving stock (Eq, Show)
 
 -- | A host, a port and a path, with no extra header, messages of at most
--- 64 MiB and one second to close.
+-- 64 MiB, thirty seconds to open and one second to close.
 config :: String -> Int -> ByteString -> Config
-config host port path = Config {host, port, path, headers = [], maxMessageSize = 64 * 1024 * 1024, closeTimeout = 1_000_000}
+config host port path = Config {host, port, path, headers = [], maxMessageSize = 64 * 1024 * 1024, openTimeout = Just 30_000_000, closeTimeout = 1_000_000}
 
 -- | A whole message, put together from its frames.
 data Message
@@ -116,16 +121,27 @@ data Connection = Connection
 -- connection is closed at once.
 --
 -- Throws 'HandshakeFailed' when the server does not accept the upgrade,
+-- 'OpenTimedOut' when the connection is not open in time,
 -- 'Streamly.External.Network.HTTP.HttpError' (@InvalidRequest@) for a
 -- path or a header that cannot be written, and 'IOError' when the TCP
 -- connection fails.
 withConnection :: Config -> (Connection -> IO a) -> IO a
 withConnection settings use = do
   either throwIO pure (validateRequest (upgradeRequest settings.host settings.port settings.path settings.headers ""))
-  bracket (connect settings.host settings.port) Net.close $ \socket -> do
-    -- Frames are small and wait for answers: do not hold them back.
-    Net.setSocketOption socket Net.NoDelay 1
-    withConnectionOver (socketTransport socket) settings use
+  -- The connection is opened unmasked, so that its time limit can stop
+  -- it; connectWithin closes what it opened when it is stopped.
+  mask $ \restore -> do
+    socket <-
+      restore (connectWithin settings.openTimeout settings.host settings.port)
+        `catch` \case
+          ConnectTimedOut -> throwIO OpenTimedOut
+          other -> throwIO other
+    ( restore $ do
+        -- Frames are small and wait for answers: do not hold them back.
+        Net.setSocketOption socket Net.NoDelay 1
+        withConnectionOver (socketTransport socket) settings use
+      )
+      `finally` Net.close socket
 
 -- | Like 'withConnection', over a connection that is already open, such
 -- as a TLS connection of @streamly-network-tls@ for a secure WebSocket
@@ -136,11 +152,13 @@ withConnectionOver transport settings use = do
   key <- newKey
   let request = upgradeRequest settings.host settings.port settings.path settings.headers key
   either throwIO pure (validateRequest request)
-  Stream.fold (Fold.drainMapM transport.send) (renderRequest request)
-  (response, rest) <-
-    readResponseHead (StreamK.fromStream transport.receive)
-      `catch` \(problem :: HttpError) -> throwIO (HandshakeFailed (show problem))
-  either throwIO pure (checkUpgrade key response)
+  rest <- opening $ do
+    Stream.fold (Fold.drainMapM transport.send) (renderRequest request)
+    (response, rest) <-
+      readResponseHead (StreamK.fromStream transport.receive)
+        `catch` \(problem :: HttpError) -> throwIO (HandshakeFailed (show problem))
+    either throwIO pure (checkUpgrade key response)
+    pure rest
   connection <- Connection transport <$> newMVar rest <*> newMVar () <*> newIORef False <*> newIORef False <*> newTVarIO 0 <*> pure settings.maxMessageSize
   value <- use connection
   -- Wait for the close frame of the server before the connection goes:
@@ -150,6 +168,10 @@ withConnectionOver transport settings use = do
     close connection
     Stream.fold Fold.drain (messages connection)
   pure value
+  where
+    opening action = case settings.openTimeout of
+      Nothing -> action
+      Just microseconds -> timeout microseconds action >>= maybe (throwIO OpenTimedOut) pure
 
 -- | Send a message, in one frame.
 --

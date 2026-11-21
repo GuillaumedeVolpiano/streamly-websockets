@@ -1,6 +1,6 @@
 cabal-version:   3.12
 name:            streamly-websockets
-version:         0.1.0.0
+version:         0.2.0.0
 synopsis:        A WebSocket client written with Streamly
 description:
   A WebSocket client (RFC 6455) over plain TCP. The opening handshake goes
@@ -55,7 +55,7 @@ library
     , stm                  ^>=2.5
     , streamly-bytestring  ^>=0.2.3
     , streamly-core        ^>=0.3.3
-    , streamly-http        ^>=0.1
+    , streamly-http        ^>=0.2
     , text                 ^>=2.1
 
 test-suite streamly-websockets-test
@@ -72,7 +72,7 @@ test-suite streamly-websockets-test
     , stm                  ^>=2.5
     , streamly-bytestring  ^>=0.2.3
     , streamly-core        ^>=0.3.3
-    , streamly-http        ^>=0.1
+    , streamly-http        ^>=0.2
     , streamly-websockets
     , tasty                ^>=1.5
     , tasty-hunit          ^>=0.10

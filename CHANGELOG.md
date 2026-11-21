@@ -1,5 +1,11 @@
 # Revision history for streamly-websockets
 
+## 0.2.0.0 -- unreleased
+
+* `openTimeout` in `Config`: thirty seconds by default for the TCP
+  connection and the answer to the upgrade, `OpenTimedOut` beyond.
+* Built on streamly-http 0.2.
+
 ## 0.1.0.0 -- 2026-11-21
 
 * A WebSocket client over TCP: `withConnection`, `send`, `receive`,

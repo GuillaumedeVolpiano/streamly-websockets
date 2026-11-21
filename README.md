@@ -29,7 +29,8 @@ main = withConnection (config "127.0.0.1" 9330 "/api") $ \connection -> do
   messages are received.
 - Sending is safe from several threads. Receiving is for one thread at a
   time.
-- A limit on the size of a message (`maxMessageSize`).
+- A limit on the size of a message (`maxMessageSize`) and on the time to
+  open the connection (`openTimeout`).
 
 ## Modules
 
