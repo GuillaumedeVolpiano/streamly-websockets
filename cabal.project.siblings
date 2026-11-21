@@ -6,3 +6,4 @@ packages: .
 optional-packages:
   ../streamly-http
   ../streamly-network-tcp
+  ../streamly-flatparse
