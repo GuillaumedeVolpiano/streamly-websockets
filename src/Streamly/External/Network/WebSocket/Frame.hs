@@ -29,15 +29,14 @@ import Data.Bits (shiftR, testBit, xor, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Unsafe qualified as BS (unsafeIndex)
-import Data.Word (Word64, Word8)
+import Data.Word (Word8)
+import FlatParse.Basic qualified as FP
 import Streamly.Data.Array (Array)
 import Streamly.Data.Array qualified as Array
-import Streamly.Data.Fold qualified as Fold
-import Streamly.Data.Parser (Parser)
-import Streamly.Data.Parser qualified as Parser
 import Streamly.Data.StreamK (StreamK)
 import Streamly.Data.StreamK qualified as StreamK
 import Streamly.External.ByteString qualified as StreamlyBS
+import Streamly.External.FlatParse qualified as Flat
 
 -- | What a frame carries.
 data Opcode
@@ -130,13 +129,15 @@ data FrameHeader = FrameHeader
   }
   deriving stock (Eq, Show)
 
--- | The header of a frame. Refuses reserved bits (no extension is
+-- | The header of a frame, as a flatparse parser: it fails while the
+-- header is not all there, and stops on an error for what no further byte
+-- can mend. Refuses reserved bits (no extension is
 -- negotiated), unknown opcodes, lengths not written in the shortest form,
 -- and control frames that are fragmented or longer than 125 bytes.
-frameHeader :: Monad m => Parser Word8 m FrameHeader
+frameHeader :: FP.Parser String FrameHeader
 frameHeader = do
-  first <- Parser.one
-  when (first .&. 0x70 /= 0) (Parser.die "a reserved bit is set")
+  first <- FP.anyWord8
+  when (first .&. 0x70 /= 0) (FP.err "a reserved bit is set")
   opcode <- case first .&. 0x0F of
     0 -> pure Continuation
     1 -> pure TextFrame
@@ -144,27 +145,24 @@ frameHeader = do
     8 -> pure CloseFrame
     9 -> pure PingFrame
     10 -> pure PongFrame
-    other -> Parser.die ("unknown opcode " <> show other)
-  second <- Parser.one
+    other -> FP.err ("unknown opcode " <> show other)
+  second <- FP.anyWord8
   let final = testBit first 7
   size <- case second .&. 0x7F of
     126 -> do
-      long <- bigEndian 2
-      when (long < 126) (Parser.die "a length not in its shortest form")
+      long <- FP.anyWord16be
+      when (long < 126) (FP.err "a length not in its shortest form")
       pure (fromIntegral long)
     127 -> do
-      long <- bigEndian 8
-      when (long < 65536) (Parser.die "a length not in its shortest form")
-      when (long > fromIntegral (maxBound :: Int)) (Parser.die "a length beyond what can be held")
+      long <- FP.anyWord64be
+      when (long < 65536) (FP.err "a length not in its shortest form")
+      when (long > fromIntegral (maxBound :: Int)) (FP.err "a length beyond what can be held")
       pure (fromIntegral long)
     short -> pure (fromIntegral short)
-  when (isControl opcode && not final) (Parser.die "a fragmented control frame")
-  when (isControl opcode && size > 125) (Parser.die "a control frame longer than 125 bytes")
-  mask <- if testBit second 7 then Just . BS.pack <$> Parser.takeEQ 4 Fold.toList else pure Nothing
+  when (isControl opcode && not final) (FP.err "a fragmented control frame")
+  when (isControl opcode && size > 125) (FP.err "a control frame longer than 125 bytes")
+  mask <- if testBit second 7 then Just <$> FP.take 4 else pure Nothing
   pure FrameHeader {final, opcode, mask, size}
-  where
-    bigEndian :: Monad m => Int -> Parser Word8 m Word64
-    bigEndian count = foldl' (\total byte -> total * 256 + fromIntegral byte) 0 <$> Parser.takeEQ count Fold.toList
 
 -- | The two ends of a connection. A client masks the frames it sends; a
 -- server does not.
@@ -187,10 +185,12 @@ readFrame side limit input =
     Just (array, rest)
       | Array.length array == 0 -> readFrame side limit rest
       | otherwise -> do
-          (outcome, afterHeader) <- Array.parseBreak (Array.toParserK frameHeader) (StreamK.cons array rest)
+          -- A header is fourteen bytes at most.
+          (outcome, afterHeader) <- Flat.parseBreak 14 frameHeader (StreamK.cons array rest)
           found <- case outcome of
-            Left (Parser.ParseError problem) -> throwIO (ProtocolViolation problem)
             Right found -> pure found
+            Left (Flat.ParserError problem) -> throwIO (ProtocolViolation problem)
+            Left _ -> throwIO (ProtocolViolation "the connection ended inside the header of a frame")
           case (side, found.mask) of
             (Client, Just _) -> throwIO (ProtocolViolation "a masked frame from the server")
             (Server, Nothing) -> throwIO (ProtocolViolation "a frame from the client that is not masked")

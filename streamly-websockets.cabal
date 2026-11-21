@@ -55,10 +55,12 @@ library
     , bytestring           ^>=0.12
     , cryptohash-sha1      ^>=0.11
     , entropy              ^>=0.4
+    , flatparse            ^>=0.5
     , network              ^>=3.2
     , stm                  ^>=2.5
     , streamly-bytestring  ^>=0.2.3
     , streamly-core        ^>=0.3.3
+    , streamly-flatparse   ^>=0.1
     , streamly-http        ^>=0.2
     , streamly-network-tcp ^>=0.1
     , text                 ^>=2.1
