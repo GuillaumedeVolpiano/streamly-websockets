@@ -18,7 +18,7 @@ import Network.WebSockets qualified as WS
 import Streamly.Data.Stream qualified as Stream
 import Streamly.Data.StreamK qualified as StreamK
 import Streamly.External.ByteString qualified as StreamlyBS
-import Streamly.External.Network.HTTP (HttpError (..))
+import Streamly.External.Network.HTTP (HttpError (..), connect, socketTransport)
 import Streamly.External.Network.WebSocket
 import Streamly.External.Network.WebSocket.Frame
 import Streamly.External.Network.WebSocket.Handshake (acceptFor)
@@ -152,6 +152,13 @@ interop =
         Stream.toList (Stream.take 3 (messages connection))
       received @?= [TextMessage "héllo", BinaryMessage (BS.pack [0, 1, 255]), TextMessage ""]
       closedInOrder @?= True
+  , testCase "over a transport of the caller" $ do
+      (closedInOrder, received) <- withPeer echo $ \settings ->
+        bracket (connect settings.host settings.port) Net.close $ \socket ->
+          withConnectionOver (socketTransport socket) settings $ \connection -> do
+            send connection (TextMessage "over a transport")
+            receive connection
+      (received, closedInOrder) @?= (Just (TextMessage "over a transport"), True)
   , testCase "messages of every length form" $ do
       let sizes = [125, 126, 65535, 65536, 300_000]
       (_, received) <- withPeer echo $ \settings -> withConnection settings $ \connection -> do

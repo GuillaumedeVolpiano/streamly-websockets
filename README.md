@@ -40,7 +40,10 @@ main = withConnection (config "127.0.0.1" 9330 "/api") $ \connection -> do
 ## Limits of this version
 
 - A client only: no server side.
-- Plain TCP only: no TLS (`ws://`, not `wss://`).
+- TLS is not built in. `withConnectionOver` takes a connection opened by
+  other means, as a `Transport` of streamly-http: one of
+  [streamly-network-tls](https://github.com/GuillaumedeVolpiano/streamly-network-tls)
+  gives secure WebSockets (`wss://`).
 - No extension (no compression) and no subprotocol negotiation.
 - Messages are sent in one frame; there is no streaming of a message.
 

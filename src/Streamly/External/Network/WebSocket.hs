@@ -18,13 +18,15 @@
 -- Pings are answered, pongs counted and the closing handshake answered
 -- while messages are received: a program that stops receiving stops all
 -- three. Sending is safe from several threads; receiving is for one thread
--- at a time. There is no TLS and no extension.
+-- at a time. TLS is not built in: 'withConnectionOver' takes a connection
+-- opened by other means. There is no extension.
 module Streamly.External.Network.WebSocket
   ( -- * Connections
     Config (..)
   , config
   , Connection
   , withConnection
+  , withConnectionOver
 
     -- * Messages
   , Message (..)
@@ -59,11 +61,10 @@ import Streamly.Data.Stream qualified as Stream
 import Streamly.Data.StreamK (StreamK)
 import Streamly.Data.StreamK qualified as StreamK
 import Streamly.External.ByteString qualified as StreamlyBS
-import Streamly.External.Network.HTTP (HttpError, connect)
+import Streamly.External.Network.HTTP (HttpError, Transport (..), connect, socketTransport)
 import Streamly.External.Network.HTTP.Wire (Header, readResponseHead, renderRequest, validateRequest)
 import Streamly.External.Network.WebSocket.Frame
 import Streamly.External.Network.WebSocket.Handshake
-import Streamly.Network.Socket qualified as Socket
 import System.Entropy (getEntropy)
 import System.Timeout (timeout)
 
@@ -97,7 +98,7 @@ data Message
 
 -- | An open connection.
 data Connection = Connection
-  { socket :: Net.Socket
+  { transport :: Transport
   , input :: MVar (StreamK IO (Array Word8))
   -- ^ What is still to read. Held while a message is received.
   , sendLock :: MVar ()
@@ -120,26 +121,35 @@ data Connection = Connection
 -- connection fails.
 withConnection :: Config -> (Connection -> IO a) -> IO a
 withConnection settings use = do
-  key <- newKey
-  let request = upgradeRequest settings.host settings.port settings.path settings.headers key
-  either throwIO pure (validateRequest request)
+  either throwIO pure (validateRequest (upgradeRequest settings.host settings.port settings.path settings.headers ""))
   bracket (connect settings.host settings.port) Net.close $ \socket -> do
     -- Frames are small and wait for answers: do not hold them back.
     Net.setSocketOption socket Net.NoDelay 1
-    Stream.fold (Socket.writeChunks socket) (renderRequest request)
-    (response, rest) <-
-      readResponseHead (StreamK.fromStream (Socket.readChunks socket))
-        `catch` \(problem :: HttpError) -> throwIO (HandshakeFailed (show problem))
-    either throwIO pure (checkUpgrade key response)
-    connection <- Connection socket <$> newMVar rest <*> newMVar () <*> newIORef False <*> newIORef False <*> newTVarIO 0 <*> pure settings.maxMessageSize
-    value <- use connection
-    -- Wait for the close frame of the server before the TCP connection
-    -- goes: closing it at once can make the system reset it, and the
-    -- server lose what it had not read yet.
-    void . try @SomeException . timeout settings.closeTimeout $ do
-      close connection
-      Stream.fold Fold.drain (messages connection)
-    pure value
+    withConnectionOver (socketTransport socket) settings use
+
+-- | Like 'withConnection', over a connection that is already open, such
+-- as a TLS connection of @streamly-network-tls@ for a secure WebSocket
+-- (@wss:\/\/@). The host and the port of the configuration only serve the
+-- @Host@ header. Opening and closing the transport are up to the caller.
+withConnectionOver :: Transport -> Config -> (Connection -> IO a) -> IO a
+withConnectionOver transport settings use = do
+  key <- newKey
+  let request = upgradeRequest settings.host settings.port settings.path settings.headers key
+  either throwIO pure (validateRequest request)
+  Stream.fold (Fold.drainMapM transport.send) (renderRequest request)
+  (response, rest) <-
+    readResponseHead (StreamK.fromStream transport.receive)
+      `catch` \(problem :: HttpError) -> throwIO (HandshakeFailed (show problem))
+  either throwIO pure (checkUpgrade key response)
+  connection <- Connection transport <$> newMVar rest <*> newMVar () <*> newIORef False <*> newIORef False <*> newTVarIO 0 <*> pure settings.maxMessageSize
+  value <- use connection
+  -- Wait for the close frame of the server before the connection goes:
+  -- closing it at once can make the system reset it, and the server lose
+  -- what it had not read yet.
+  void . try @SomeException . timeout settings.closeTimeout $ do
+    close connection
+    Stream.fold Fold.drain (messages connection)
+  pure value
 
 -- | Send a message, in one frame.
 --
@@ -181,7 +191,7 @@ sendFrame connection closing frame =
     when closed (throwIO ConnectionClosed)
     key <- getEntropy 4
     when closing (writeIORef connection.closeSent True)
-    Socket.putChunk connection.socket (StreamlyBS.toArray (encodeFrame (Just key) frame))
+    connection.transport.send (StreamlyBS.toArray (encodeFrame (Just key) frame))
 
 -- | Like 'sendFrame', for answers that no longer matter once the
 -- connection is closing or gone.
