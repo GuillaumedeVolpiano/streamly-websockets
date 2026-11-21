@@ -60,6 +60,7 @@ library
     , streamly-bytestring  ^>=0.2.3
     , streamly-core        ^>=0.3.3
     , streamly-http        ^>=0.2
+    , streamly-network-tcp ^>=0.1
     , text                 ^>=2.1
 
 test-suite streamly-websockets-test

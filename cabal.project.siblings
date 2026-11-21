@@ -5,3 +5,4 @@ packages: .
 -- The library this one is built on, when it is checked out next to it.
 optional-packages:
   ../streamly-http
+  ../streamly-network-tcp

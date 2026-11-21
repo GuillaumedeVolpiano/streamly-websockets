@@ -10,6 +10,7 @@
 * `readFrame` takes the side that reads: a server unmasks the frames of a
   client and refuses those that are not masked.
 * The answer to the upgrade is at most 64 KiB.
+* `listen` and the accept loop come from streamly-network-tcp.
 * Built on streamly-http 0.2.
 
 ## 0.1.0.0 -- 2026-11-21
