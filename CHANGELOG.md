@@ -4,6 +4,7 @@
 
 * `openTimeout` in `Config`: thirty seconds by default for the TCP
   connection and the answer to the upgrade, `OpenTimedOut` beyond.
+* The answer to the upgrade is at most 64 KiB.
 * Built on streamly-http 0.2.
 
 ## 0.1.0.0 -- 2026-11-21

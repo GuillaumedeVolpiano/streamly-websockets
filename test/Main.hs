@@ -305,13 +305,14 @@ chosen =
       (_, received) <- withRawServer (accepting [Frame True TextFrame "only"]) $ \settings ->
         withConnection settings (Stream.toList . messages)
       received @?= [TextMessage "only"]
-  , testCase "the server refuses: another status, a wrong proof, no upgrade, an extension" $ do
+  , testCase "the server refuses: another status, a wrong proof, no upgrade, an extension, an endless answer" $ do
       refused (const ["HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"])
       refused (const ["HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"])
       refused (\key -> ["HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " <> acceptFor key <> "\r\n\r\n"])
       refused (\key -> ["HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: " <> acceptFor key <> "\r\n\r\n"])
       refused (\key -> ["HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Extensions: permessage-deflate\r\nSec-WebSocket-Accept: " <> acceptFor key <> "\r\n\r\n"])
       refused (const ["SSH-2.0-OpenSSH\r\n"])
+      refused (\key -> ["HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" <> BS.concat (replicate 2000 "X-Padding: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n") <> "Sec-WebSocket-Accept: " <> acceptFor key <> "\r\n\r\n"])
   , testCase "what breaks the protocol is reported, and what came before delivered" $ do
       let breaking sent = do
             (_, outcome) <- withRawServer (accepting (Frame True TextFrame "fine" : sent)) $ \settings ->

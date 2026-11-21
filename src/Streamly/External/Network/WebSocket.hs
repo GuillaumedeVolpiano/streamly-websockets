@@ -62,7 +62,7 @@ import Streamly.Data.StreamK (StreamK)
 import Streamly.Data.StreamK qualified as StreamK
 import Streamly.External.ByteString qualified as StreamlyBS
 import Streamly.External.Network.HTTP (HttpError (..), Transport (..), connectWithin, socketTransport)
-import Streamly.External.Network.HTTP.Wire (Header, readResponseHead, renderRequest, validateRequest)
+import Streamly.External.Network.HTTP.Wire (Header, readResponseHeadWithin, renderRequest, validateRequest)
 import Streamly.External.Network.WebSocket.Frame
 import Streamly.External.Network.WebSocket.Handshake
 import System.Entropy (getEntropy)
@@ -155,7 +155,8 @@ withConnectionOver transport settings use = do
   rest <- opening $ do
     Stream.fold (Fold.drainMapM transport.send) (renderRequest request)
     (response, rest) <-
-      readResponseHead (StreamK.fromStream transport.receive)
+      -- No answer to an upgrade needs more than this.
+      readResponseHeadWithin (Just 65536) (StreamK.fromStream transport.receive)
         `catch` \(problem :: HttpError) -> throwIO (HandshakeFailed (show problem))
     either throwIO pure (checkUpgrade key response)
     pure rest
