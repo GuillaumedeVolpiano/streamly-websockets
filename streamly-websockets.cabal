@@ -1,6 +1,6 @@
 cabal-version:   3.12
 name:            streamly-websockets
-version:         0.3.0.1
+version:         0.3.0.2
 synopsis:        WebSocket clients and servers written with Streamly
 description:
   WebSockets (RFC 6455) over plain TCP, for clients and for servers. The
