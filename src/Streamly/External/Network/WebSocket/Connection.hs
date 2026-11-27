@@ -90,7 +90,7 @@ send connection = \case
 -- | Send a ping with a payload of at most 125 bytes. The pong that answers
 -- it is counted by 'pongCount' when it is received.
 --
--- Throws like 'send', and 'ProtocolViolation' for too long a payload.
+-- Throws like @send@, and 'ProtocolViolation' for too long a payload.
 ping :: Connection -> ByteString -> IO ()
 ping connection payload = do
   when (BS.length payload > 125) (throwIO (ProtocolViolation "a ping payload longer than 125 bytes"))
@@ -188,7 +188,7 @@ receive connection = modifyMVar connection.input $ \input -> do
         Left _ -> failWith 1007 (ProtocolViolation "a text message that is not UTF-8")
       _ -> pure (rest, Just (BinaryMessage bytes))
 
--- | The messages received until the connection is closed. See 'receive'.
+-- | The messages received until the connection is closed. See @receive@.
 messages :: Connection -> Stream IO Message
 messages connection = Stream.unfoldrM (\() -> fmap (,()) <$> receive connection) ()
 
