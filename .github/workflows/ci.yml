@@ -25,7 +25,7 @@ jobs:
       - name: Plan
         run: |
           cabal update
-          cabal build all --enable-tests --dry-run
+          cabal build all --enable-tests --enable-benchmarks --dry-run
 
       - uses: actions/cache@v4
         with:
@@ -34,7 +34,7 @@ jobs:
           restore-keys: ${{ runner.os }}-ghc-${{ matrix.ghc }}-
 
       - name: Build
-        run: cabal build all --enable-tests
+        run: cabal build all --enable-tests --enable-benchmarks
 
       - name: Test
         run: cabal test all --test-show-details=direct
