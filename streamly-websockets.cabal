@@ -81,16 +81,16 @@ test-suite streamly-websockets-test
   ghc-options:    -threaded
   build-depends:
     , async                ^>=2.2
-    , base                 >=4.19 && <4.22
-    , bytestring           ^>=0.12
-    , network              ^>=3.2
-    , stm                  ^>=2.5
-    , streamly-bytestring  ^>=0.2.3
-    , streamly-core        ^>=0.3.3
-    , streamly-http        ^>=0.3
+    , base
+    , bytestring
+    , network
+    , stm
+    , streamly-bytestring
+    , streamly-core
+    , streamly-http
     , streamly-websockets
     , tasty                ^>=1.5
     , tasty-hunit          ^>=0.10
     , tasty-quickcheck     ^>=0.11
-    , text                 ^>=2.1
+    , text
     , websockets           ^>=0.13
