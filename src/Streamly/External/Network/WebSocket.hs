@@ -6,14 +6,16 @@
 -- A WebSocket client (RFC 6455) over plain TCP, written with Streamly.
 --
 -- > {-# LANGUAGE OverloadedStrings #-}
--- > import Streamly.Data.Fold qualified as Fold
--- > import Streamly.Data.Stream qualified as Stream
--- > import Streamly.External.Network.WebSocket
+-- > import Streamly.Data.Fold (drainMapM)
+-- > import Streamly.Data.Stream (fold)
+-- > import Streamly.Data.Stream qualified as S (take)
+-- > import Streamly.External.Network.WebSocket (Message (TextMessage), config,
+-- >                                             messages, send, withConnection)
 -- >
 -- > main :: IO ()
 -- > main = withConnection (config "127.0.0.1" 9330 "/api") $ \connection -> do
 -- >   send connection (TextMessage "hello")
--- >   Stream.fold (Fold.drainMapM print) (Stream.take 3 (messages connection))
+-- >   fold (drainMapM print) (S.take 3 (messages connection))
 --
 -- Pings are answered, pongs counted and the closing handshake answered
 -- while messages are received: a program that stops receiving stops all
@@ -46,15 +48,23 @@ module Streamly.External.Network.WebSocket
 
 import Control.Exception (catch, finally, mask, throwIO)
 import Data.ByteString (ByteString)
-import Network.Socket qualified as Net
-import Streamly.Data.Fold qualified as Fold
-import Streamly.Data.Stream qualified as Stream
-import Streamly.Data.StreamK qualified as StreamK
-import Streamly.External.Network.HTTP (HttpError (..), Transport (..), connectWithin, socketTransport)
-import Streamly.External.Network.HTTP.Wire (Header, readResponseHeadWithin, renderRequest, validateRequest)
-import Streamly.External.Network.WebSocket.Connection
-import Streamly.External.Network.WebSocket.Frame (Side (..), WebSocketError (..))
-import Streamly.External.Network.WebSocket.Handshake
+import Network.Socket (SocketOption (NoDelay), setSocketOption)
+import Network.Socket qualified as N (close)
+import Streamly.Data.Fold (drainMapM)
+import Streamly.Data.Stream (fold)
+import Streamly.Data.StreamK (fromStream)
+import Streamly.External.Network.HTTP (HttpError (..), Transport (..),
+                                       connectWithin, socketTransport)
+import Streamly.External.Network.HTTP.Wire (Header, readResponseHeadWithin,
+                                            renderRequest, validateRequest)
+import Streamly.External.Network.WebSocket.Connection (Connection, Message (..),
+                                                       close, established,
+                                                       messages, ping,
+                                                       pongCount, receive, send)
+import Streamly.External.Network.WebSocket.Frame (Side (..),
+                                                  WebSocketError (..))
+import Streamly.External.Network.WebSocket.Handshake (checkUpgrade, newKey,
+                                                      upgradeRequest)
 import System.Timeout (timeout)
 
 -- | Where to connect, and within what bounds.
@@ -107,10 +117,10 @@ withConnection settings use = do
           other -> throwIO other
     ( restore $ do
         -- Frames are small and wait for answers: do not hold them back.
-        Net.setSocketOption socket Net.NoDelay 1
+        setSocketOption socket NoDelay 1
         withConnectionOver (socketTransport socket) settings use
       )
-      `finally` Net.close socket
+      `finally` N.close socket
 
 -- | Like 'withConnection', over a connection that is already open, such
 -- as a TLS connection of @streamly-network-tls@ for a secure WebSocket
@@ -122,10 +132,10 @@ withConnectionOver transport settings use = do
   let request = upgradeRequest settings.host settings.port settings.path settings.headers key
   either throwIO pure (validateRequest request)
   rest <- opening $ do
-    Stream.fold (Fold.drainMapM transport.send) (renderRequest request)
+    fold (drainMapM transport.send) (renderRequest request)
     (response, rest) <-
       -- No answer to an upgrade needs more than this.
-      readResponseHeadWithin (Just 65536) (StreamK.fromStream transport.receive)
+      readResponseHeadWithin (Just 65536) (fromStream transport.receive)
         `catch` \(problem :: HttpError) -> throwIO (HandshakeFailed (show problem))
     either throwIO pure (checkUpgrade key response)
     pure rest

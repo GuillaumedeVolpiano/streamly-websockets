@@ -12,14 +12,16 @@ A client:
 ```haskell
 {-# LANGUAGE OverloadedStrings #-}
 
-import Streamly.Data.Fold qualified as Fold
-import Streamly.Data.Stream qualified as Stream
-import Streamly.External.Network.WebSocket
+import Streamly.Data.Fold (drainMapM)
+import Streamly.Data.Stream (fold)
+import Streamly.Data.Stream qualified as S (take)
+import Streamly.External.Network.WebSocket (Message (TextMessage), config,
+                                            messages, send, withConnection)
 
 main :: IO ()
 main = withConnection (config "127.0.0.1" 9330 "/api") $ \connection -> do
   send connection (TextMessage "hello")
-  Stream.fold (Fold.drainMapM print) (Stream.take 3 (messages connection))
+  fold (drainMapM print) (S.take 3 (messages connection))
 ```
 
 A server that sends back what it receives:
@@ -27,13 +29,14 @@ A server that sends back what it receives:
 ```haskell
 {-# LANGUAGE OverloadedStrings #-}
 
-import Streamly.Data.Fold qualified as Fold
-import Streamly.Data.Stream qualified as Stream
-import Streamly.External.Network.WebSocket.Server
+import Streamly.Data.Fold (drainMapM)
+import Streamly.Data.Stream (fold)
+import Streamly.External.Network.WebSocket.Server (defaultServerOptions,
+                                                   messages, send, serve)
 
 main :: IO ()
 main = serve "127.0.0.1" 8080 defaultServerOptions $ \_ connection ->
-  Stream.fold (Fold.drainMapM (send connection)) (messages connection)
+  fold (drainMapM (send connection)) (messages connection)
 ```
 
 ## What it does

@@ -19,24 +19,28 @@ module Streamly.External.Network.WebSocket.Handshake
   ) where
 
 import Control.Monad (unless, when)
-import Crypto.Hash.SHA1 qualified as SHA1
-import Data.ByteString (ByteString)
-import Data.ByteString qualified as BS
-import Data.ByteString.Base64 qualified as Base64
-import Data.ByteString.Char8 qualified as BS8
+import Crypto.Hash.SHA1 (hash)
+import Data.ByteString (ByteString, split)
+import Data.ByteString qualified as BS (null)
+import Data.ByteString.Base64 (encode)
+import Data.ByteString.Char8 (strip, unpack)
+import Data.ByteString.Char8 qualified as BS8 (map)
 import Data.Char (toLower)
 import Data.Maybe (isJust)
-import Streamly.External.Network.HTTP.Wire (Header, Request (..), RequestBody (..), RequestHead, Response (..), header, requestHeader, requestMethod)
+import Streamly.External.Network.HTTP.Wire (Header, Request (..),
+                                            RequestBody (..), RequestHead,
+                                            Response (..), header,
+                                            requestHeader, requestMethod)
 import Streamly.External.Network.WebSocket.Frame (WebSocketError (..))
 import System.Entropy (getEntropy)
 
 -- | A key for one handshake: sixteen random bytes in base64.
 newKey :: IO ByteString
-newKey = Base64.encode <$> getEntropy 16
+newKey = encode <$> getEntropy 16
 
 -- | What a server must answer in @Sec-WebSocket-Accept@ to a key.
 acceptFor :: ByteString -> ByteString
-acceptFor key = Base64.encode (SHA1.hash (key <> "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+acceptFor key = encode (hash (key <> "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
 
 -- | The request that asks a host and a port to open a WebSocket on a
 -- path, with extra headers and the key of the handshake.
@@ -63,7 +67,7 @@ upgradeRequest host port path extra key =
 checkUpgrade :: ByteString -> Response body -> Either WebSocketError ()
 checkUpgrade key response = do
   unless (response.status == 101) $
-    refuse ("the server answered " <> show response.status <> " " <> BS8.unpack response.reason)
+    refuse ("the server answered " <> show response.status <> " " <> unpack response.reason)
   unless (fmap lower (header "upgrade" response) == Just "websocket") $
     refuse "the answer does not upgrade to websocket"
   unless (maybe False (elem "upgrade" . tokens) (header "connection" response)) $
@@ -75,7 +79,7 @@ checkUpgrade key response = do
   where
     refuse = Left . HandshakeFailed
     lower = BS8.map toLower
-    tokens = map (lower . BS8.strip) . BS.split 44
+    tokens = map (lower . strip) . split 44
 
 -- | Check that a request asks properly for a WebSocket, and give its key:
 -- a @GET@ that upgrades to @websocket@, version 13, with a key.
@@ -84,14 +88,14 @@ checkUpgradeRequest request = do
   unless (requestMethod request == "GET") (refuse "the request is not a GET")
   unless (fmap lower (requestHeader "upgrade" request) == Just "websocket") (refuse "the request does not ask for websocket")
   unless (maybe False (elem "upgrade" . tokens) (requestHeader "connection" request)) (refuse "the request does not say Connection: Upgrade")
-  unless (fmap BS8.strip (requestHeader "sec-websocket-version" request) == Just "13") (refuse "the request is not for version 13")
+  unless (fmap strip (requestHeader "sec-websocket-version" request) == Just "13") (refuse "the request is not for version 13")
   case requestHeader "sec-websocket-key" request of
     Just key | not (BS.null key) -> Right key
     _ -> refuse "the request has no key"
   where
     refuse = Left . HandshakeFailed
     lower = BS8.map toLower
-    tokens = map (lower . BS8.strip) . BS.split 44
+    tokens = map (lower . strip) . split 44
 
 -- | The answer that accepts the upgrade asked with a key.
 upgradeResponse :: ByteString -> ByteString

@@ -19,24 +19,27 @@ module Streamly.External.Network.WebSocket.Connection
   ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
-import Control.Concurrent.STM (STM, TVar, atomically, modifyTVar', newTVarIO, readTVar)
+import Control.Concurrent.STM (STM, TVar, atomically, modifyTVar', newTVarIO,
+                               readTVar)
 import Control.Exception (SomeException, catch, onException, throwIO, try)
 import Control.Monad (unless, void, when)
-import Data.ByteString (ByteString)
-import Data.ByteString qualified as BS
+import Data.ByteString (ByteString, pack)
+import Data.ByteString qualified as BS (concat, length, take)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import Data.Text.Encoding (decodeUtf8', encodeUtf8)
 import Data.Word (Word8)
 import Streamly.Data.Array (Array)
-import Streamly.Data.Fold qualified as Fold
-import Streamly.Data.Stream (Stream)
-import Streamly.Data.Stream qualified as Stream
-import Streamly.Data.StreamK (StreamK)
-import Streamly.Data.StreamK qualified as StreamK
-import Streamly.External.ByteString qualified as StreamlyBS
+import Streamly.Data.Fold (drain)
+import Streamly.Data.Stream (Stream, fold, unfoldrM)
+import Streamly.Data.StreamK (StreamK, nil)
+import Streamly.External.ByteString (toArray)
 import Streamly.External.Network.HTTP (Transport (..))
-import Streamly.External.Network.WebSocket.Frame
+import Streamly.External.Network.WebSocket.Frame (Frame (..),
+                                                  Opcode (BinaryFrame, CloseFrame, Continuation, PingFrame, PongFrame, TextFrame),
+                                                  Side (..),
+                                                  WebSocketError (ConnectionClosed, MessageTooLarge, ProtocolViolation),
+                                                  encodeFrame, readFrame)
 import System.Entropy (getEntropy)
 import System.Timeout (timeout)
 
@@ -75,7 +78,7 @@ established side transport rest maxMessageSize closeTimeout use = do
   -- side lose what it had not read yet.
   void . try @SomeException . timeout closeTimeout $ do
     close connection
-    Stream.fold Fold.drain (messages connection)
+    fold drain (messages connection)
   pure value
 
 -- | Send a message, in one frame.
@@ -121,7 +124,7 @@ sendFrame connection closing frame =
       Client -> Just <$> getEntropy 4
       Server -> pure Nothing
     when closing (writeIORef connection.closeSent True)
-    connection.transport.send (StreamlyBS.toArray (encodeFrame key frame))
+    connection.transport.send (toArray (encodeFrame key frame))
 
 -- | Like 'sendFrame', for answers that no longer matter once the
 -- connection is closing or gone.
@@ -160,7 +163,7 @@ receive connection = modifyMVar connection.input $ \input -> do
           problem@(MessageTooLarge _) -> failWith 1009 problem
           problem -> failWith 1002 problem
       case next of
-        Nothing -> (StreamK.nil, Nothing) <$ finish
+        Nothing -> (nil, Nothing) <$ finish
         Just (frame, rest) -> case frame.opcode of
           PingFrame -> sendQuietly connection False (Frame True PongFrame frame.payload) >> assemble rest pending
           PongFrame -> atomically (modifyTVar' connection.pongs (+ 1)) >> assemble rest pending
@@ -168,7 +171,7 @@ receive connection = modifyMVar connection.input $ \input -> do
             when (BS.length frame.payload == 1) (violation "a close frame with half a status")
             -- Answer with the same status, unless the closing is ours.
             sendQuietly connection True (Frame True CloseFrame (BS.take 2 frame.payload))
-            (StreamK.nil, Nothing) <$ finish
+            (nil, Nothing) <$ finish
           Continuation -> case pending of
             Nothing -> violation "a continuation frame without a message to continue"
             Just (opcode, parts, size) -> do
@@ -190,8 +193,8 @@ receive connection = modifyMVar connection.input $ \input -> do
 
 -- | The messages received until the connection is closed. See @receive@.
 messages :: Connection -> Stream IO Message
-messages connection = Stream.unfoldrM (\() -> fmap (,()) <$> receive connection) ()
+messages connection = unfoldrM (\() -> fmap (,()) <$> receive connection) ()
 
 -- | A close status as the first two bytes of the payload of a close frame.
 statusBytes :: Int -> ByteString
-statusBytes status = BS.pack [fromIntegral (status `div` 256), fromIntegral (status `mod` 256)]
+statusBytes status = pack [fromIntegral (status `div` 256), fromIntegral (status `mod` 256)]

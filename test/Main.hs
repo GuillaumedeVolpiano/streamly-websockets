@@ -9,23 +9,57 @@ import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.STM (atomically, check)
 import Control.Exception (bracket, try)
 import Control.Monad (forever, void)
-import Data.ByteString (ByteString)
-import Data.ByteString qualified as BS
-import Data.ByteString.Char8 qualified as BS8
-import Data.ByteString.Lazy qualified as LazyByteString
-import Data.Text qualified as Text
-import Network.Socket qualified as Net
-import Network.Socket.ByteString qualified as NetBS
-import Network.WebSockets qualified as WS
-import Streamly.Data.Fold qualified as Fold
-import Streamly.Data.Stream qualified as Stream
-import Streamly.Data.StreamK qualified as StreamK
-import Streamly.External.ByteString qualified as StreamlyBS
+import Data.ByteString (ByteString, breakSubstring, isInfixOf, isPrefixOf)
+import Data.ByteString qualified as BS (concat, drop, length, null, pack,
+                                        replicate, splitAt, take, takeWhile)
+import Data.ByteString.Char8 (strip)
+import Data.ByteString.Char8 qualified as BS8 (filter, lines, pack)
+import Data.ByteString.Lazy (fromStrict)
+import Data.Text (Text)
+import Data.Text qualified as T (length, pack)
+import Network.Socket (Family (AF_INET), ShutdownCmd (ShutdownSend),
+                       SockAddr (SockAddrInet), Socket,
+                       SocketOption (ReuseAddr), SocketType (Stream), accept,
+                       bind, defaultProtocol, setSocketOption, shutdown,
+                       socketPort, tupleToHostAddress)
+import Network.Socket qualified as N (close, listen, socket)
+import Network.Socket.ByteString (recv, sendAll)
+import Network.WebSockets (ConnectionException (CloseRequest),
+                           ControlMessage (Pong), DataMessage (Text),
+                           Message (ControlMessage),
+                           PendingConnection (pendingRequest),
+                           RequestHead (requestHeaders, requestPath),
+                           acceptRequest, defaultConnectionOptions,
+                           makePendingConnection, receiveData,
+                           receiveDataMessage, runClient, runClientWith,
+                           sendBinaryData, sendClose, sendDataMessage, sendPing,
+                           sendTextData)
+import Network.WebSockets qualified as NWS (Connection, receive)
+import Streamly.Data.Fold (drainMapM)
+import Streamly.Data.Stream (fold, fromList, toList)
+import Streamly.Data.Stream qualified as S (take)
+import Streamly.Data.StreamK (fromStream)
+import Streamly.External.ByteString (toArray)
 import Streamly.External.Network.HTTP (HttpError (..), connect, socketTransport)
-import Streamly.External.Network.WebSocket
-import Streamly.External.Network.WebSocket.Frame
+import Streamly.External.Network.WebSocket (Config (headers, host, maxMessageSize, openTimeout, port),
+                                            Connection,
+                                            Message (BinaryMessage, TextMessage),
+                                            WebSocketError (ConnectionClosed, HandshakeFailed, MessageTooLarge, OpenTimedOut, ProtocolViolation),
+                                            close, config, messages, ping,
+                                            pongCount, receive, send,
+                                            withConnection, withConnectionOver)
+import Streamly.External.Network.WebSocket.Frame (Frame (Frame),
+                                                  Opcode (BinaryFrame, CloseFrame, Continuation, PingFrame, TextFrame),
+                                                  Side (Client, Server),
+                                                  applyMask, encodeFrame,
+                                                  readFrame)
 import Streamly.External.Network.WebSocket.Handshake (acceptFor)
-import Streamly.External.Network.WebSocket.Server qualified as Server
+import Streamly.External.Network.WebSocket.Server (acceptOver,
+                                                   defaultServerOptions,
+                                                   serveSocket)
+import Streamly.External.Network.WebSocket.Server qualified as WSS (ServerOptions (openTimeout),
+                                                                    Upgrade (headers, path),
+                                                                    listen)
 import Test.Tasty (TestTree, defaultMain, localOption, mkTimeout, testGroup)
 import Test.Tasty.HUnit (assertFailure, testCase, (@?=))
 import Test.Tasty.QuickCheck (Positive (..), ioProperty, testProperty, (===))
@@ -52,7 +86,7 @@ pieces size bytes
 
 -- | Read every frame from bytes cut into pieces of a size.
 readAll :: Int -> Int -> ByteString -> IO [Frame]
-readAll limit size bytes = go (StreamK.fromStream (Stream.fromList (map StreamlyBS.toArray (pieces size bytes))))
+readAll limit size bytes = go (fromStream (fromList (map toArray (pieces size bytes))))
   where
     go input =
       readFrame Client limit input >>= \case
@@ -118,33 +152,33 @@ frames =
               readFrame Server 100_000 input >>= \case
                 Nothing -> pure []
                 Just (frame, rest) -> (frame :) <$> go rest
-        received <- go (StreamK.fromStream (Stream.fromList (map StreamlyBS.toArray (pieces (size * 7) (BS.concat (map (encodeFrame (Just "\1\2\254\255")) sent))))))
+        received <- go (fromStream (fromList (map toArray (pieces (size * 7) (BS.concat (map (encodeFrame (Just "\1\2\254\255")) sent))))))
         pure (received === sent)
   , testCase "a server refuses a frame that is not masked" $
-      violates (readFrame Server 100 (StreamK.fromStream (Stream.fromList [StreamlyBS.toArray (encodeFrame Nothing (Frame True TextFrame "Hello"))])))
+      violates (readFrame Server 100 (fromStream (fromList [toArray (encodeFrame Nothing (Frame True TextFrame "Hello"))])))
   , testCase "control frames fragmented or too long" $ do
       violates (readAll 100 4096 (BS.pack [0x09, 0x00]))
       violates (readAll 1000 4096 (BS.pack [0x89, 0x7E, 0x00, 0x7E] <> BS.replicate 126 0))
   ]
 
 -- | A socket listening on a free port of the loopback interface.
-listening :: IO Net.Socket
+listening :: IO Socket
 listening = do
-  listener <- Net.socket Net.AF_INET Net.Stream Net.defaultProtocol
-  Net.setSocketOption listener Net.ReuseAddr 1
-  Net.bind listener (Net.SockAddrInet 0 (Net.tupleToHostAddress (127, 0, 0, 1)))
-  Net.listen listener 1
+  listener <- N.socket AF_INET Stream defaultProtocol
+  setSocketOption listener ReuseAddr 1
+  bind listener (SockAddrInet 0 (tupleToHostAddress (127, 0, 0, 1)))
+  N.listen listener 1
   pure listener
 
 -- | Serve one connection with the @websockets@ package, and run a client
 -- against it. Returns what both return.
-withPeer :: (WS.Connection -> IO a) -> (Config -> IO b) -> IO (a, b)
+withPeer :: (NWS.Connection -> IO a) -> (Config -> IO b) -> IO (a, b)
 withPeer serve run =
-  bracket listening Net.close $ \listener -> do
-    port <- Net.socketPort listener
-    let accepted = bracket (fst <$> Net.accept listener) Net.close $ \peer -> do
-          pending <- WS.makePendingConnection peer WS.defaultConnectionOptions
-          WS.acceptRequest pending >>= serve
+  bracket listening N.close $ \listener -> do
+    port <- socketPort listener
+    let accepted = bracket (fst <$> accept listener) N.close $ \peer -> do
+          pending <- makePendingConnection peer defaultConnectionOptions
+          acceptRequest pending >>= serve
     withAsync accepted $ \server -> do
       result <- run (config "127.0.0.1" (fromIntegral port) "/chat?room=1")
       served <- wait server
@@ -152,10 +186,10 @@ withPeer serve run =
 
 -- | Echo data messages until the client closes; 'True' when it closed in
 -- order.
-echo :: WS.Connection -> IO Bool
+echo :: NWS.Connection -> IO Bool
 echo connection =
-  try (forever (WS.receiveDataMessage connection >>= WS.sendDataMessage connection)) >>= \case
-    Left (WS.CloseRequest 1000 _) -> pure True
+  try (forever (receiveDataMessage connection >>= sendDataMessage connection)) >>= \case
+    Left (CloseRequest 1000 _) -> pure True
     Left _ -> pure False
     Right () -> pure False
 
@@ -166,12 +200,12 @@ interop =
         send connection (TextMessage "héllo")
         send connection (BinaryMessage (BS.pack [0, 1, 255]))
         send connection (TextMessage "")
-        Stream.toList (Stream.take 3 (messages connection))
+        toList (S.take 3 (messages connection))
       received @?= [TextMessage "héllo", BinaryMessage (BS.pack [0, 1, 255]), TextMessage ""]
       closedInOrder @?= True
   , testCase "over a transport of the caller" $ do
       (closedInOrder, received) <- withPeer echo $ \settings ->
-        bracket (connect settings.host settings.port) Net.close $ \socket ->
+        bracket (connect settings.host settings.port) N.close $ \socket ->
           withConnectionOver (socketTransport socket) settings $ \connection -> do
             send connection (TextMessage "over a transport")
             receive connection
@@ -180,30 +214,30 @@ interop =
       let sizes = [125, 126, 65535, 65536, 300_000]
       (_, received) <- withPeer echo $ \settings -> withConnection settings $ \connection -> do
         mapM_ (\size -> send connection (BinaryMessage (BS.replicate size 7))) sizes
-        Stream.toList (Stream.take (length sizes) (messages connection))
-      map (\case BinaryMessage bytes -> BS.length bytes; TextMessage text -> negate (Text.length text)) received @?= sizes
+        toList (S.take (length sizes) (messages connection))
+      map (\case BinaryMessage bytes -> BS.length bytes; TextMessage text -> negate (T.length text)) received @?= sizes
   , testCase "the path and the extra headers reach the server" $ do
-      let serve listener = bracket (fst <$> Net.accept listener) Net.close $ \peer -> do
-            pending <- WS.makePendingConnection peer WS.defaultConnectionOptions
-            let request = WS.pendingRequest pending
-            void (WS.acceptRequest pending)
-            pure (WS.requestPath request, lookup "X-Extra" (WS.requestHeaders request), lookup "Host" (WS.requestHeaders request))
-      bracket listening Net.close $ \listener -> do
-        port <- Net.socketPort listener
+      let serve listener = bracket (fst <$> accept listener) N.close $ \peer -> do
+            pending <- makePendingConnection peer defaultConnectionOptions
+            let request = pendingRequest pending
+            void (acceptRequest pending)
+            pure (requestPath request, lookup "X-Extra" (requestHeaders request), lookup "Host" (requestHeaders request))
+      bracket listening N.close $ \listener -> do
+        port <- socketPort listener
         withAsync (serve listener) $ \server -> do
           withConnection (config "127.0.0.1" (fromIntegral port) "/chat?room=1") {headers = [("X-Extra", "yes")]} (\_ -> pure ())
           seen <- wait server
           seen @?= ("/chat?room=1", Just "yes", Just ("127.0.0.1:" <> BS8.pack (show port)))
   , testCase "a ping of the server is answered while receiving" $ do
       let serve connection = do
-            WS.sendPing connection ("are you there" :: ByteString)
-            answer <- WS.receive connection
-            WS.sendTextData connection ("done" :: ByteString)
-            void (try @WS.ConnectionException (forever (WS.receiveDataMessage connection)))
+            sendPing connection ("are you there" :: ByteString)
+            answer <- NWS.receive connection
+            sendTextData connection ("done" :: ByteString)
+            void (try @ConnectionException (forever (receiveDataMessage connection)))
             pure answer
       (answer, received) <- withPeer serve $ \settings -> withConnection settings receive
       received @?= Just (TextMessage "done")
-      answer @?= WS.ControlMessage (WS.Pong "are you there")
+      answer @?= ControlMessage (Pong "are you there")
   , testCase "the pong to a ping is counted" $ do
       (_, counts) <- withPeer echo $ \settings -> withConnection settings $ \connection -> do
         before <- atomically (pongCount connection)
@@ -215,21 +249,21 @@ interop =
       counts @?= (0, Just (TextMessage "after the ping"), 1)
   , testCase "waiting for a pong in STM, with another thread receiving" $ do
       (_, arrived) <- withPeer echo $ \settings -> withConnection settings $ \connection ->
-        withAsync (Stream.toList (messages connection)) $ \_ -> do
+        withAsync (toList (messages connection)) $ \_ -> do
           ping connection ""
           atomically (pongCount connection >>= check . (> 0))
           pure True
       arrived @?= True
   , testCase "a server that closes ends the messages, and gets its close back" $ do
       let serve connection = do
-            WS.sendTextData connection ("last" :: ByteString)
-            WS.sendClose connection ("bye" :: ByteString)
-            try (forever (WS.receiveDataMessage connection)) >>= \case
-              Left (WS.CloseRequest status _) -> pure (Just status)
+            sendTextData connection ("last" :: ByteString)
+            sendClose connection ("bye" :: ByteString)
+            try (forever (receiveDataMessage connection)) >>= \case
+              Left (CloseRequest status _) -> pure (Just status)
               Left _ -> pure Nothing
               Right () -> pure Nothing
       (echoed, outcome) <- withPeer serve $ \settings -> withConnection settings $ \connection -> do
-        received <- Stream.toList (messages connection)
+        received <- toList (messages connection)
         again <- receive connection
         late <- try (send connection (TextMessage "too late"))
         pure (received, again, late)
@@ -237,19 +271,19 @@ interop =
       echoed @?= Just 1000
   , testCase "after close nothing is sent, and messages still arrive" $ do
       let serve connection = do
-            first <- WS.receiveDataMessage connection
-            WS.sendTextData connection ("still here" :: ByteString)
-            closed <- try @WS.ConnectionException (WS.receiveDataMessage connection)
+            first <- receiveDataMessage connection
+            sendTextData connection ("still here" :: ByteString)
+            closed <- try @ConnectionException (receiveDataMessage connection)
             pure (first, either (const True) (const False) closed)
       ((first, closed), outcome) <- withPeer serve $ \settings -> withConnection settings $ \connection -> do
         send connection (TextMessage "hello")
         close connection
         close connection
         late <- try (send connection (TextMessage "too late"))
-        received <- Stream.toList (messages connection)
+        received <- toList (messages connection)
         pure (late, received)
       outcome @?= (Left ConnectionClosed, [TextMessage "still here"])
-      first @?= WS.Text (LazyByteString.fromStrict "hello") Nothing
+      first @?= Text (fromStrict "hello") Nothing
       closed @?= True
   ]
 
@@ -257,14 +291,14 @@ interop =
 -- of the key sent, and ends its side of the connection. Returns the request with the result.
 withRawServer :: (ByteString -> [ByteString]) -> (Config -> IO a) -> IO (ByteString, a)
 withRawServer answer run =
-  bracket listening Net.close $ \listener -> do
-    port <- Net.socketPort listener
-    let serve = bracket (fst <$> Net.accept listener) Net.close $ \peer -> do
+  bracket listening N.close $ \listener -> do
+    port <- socketPort listener
+    let serve = bracket (fst <$> accept listener) N.close $ \peer -> do
           request <- readHead peer ""
-          mapM_ (NetBS.sendAll peer) (answer (keyOf request))
+          mapM_ (sendAll peer) (answer (keyOf request))
           -- Say that nothing more comes, then read until the client is
           -- done, so that nothing is reset.
-          Net.shutdown peer Net.ShutdownSend
+          shutdown peer ShutdownSend
           drainFrom peer
           pure request
     withAsync serve $ \server -> do
@@ -273,15 +307,15 @@ withRawServer answer run =
       pure (request, result)
   where
     readHead peer seen
-      | "\r\n\r\n" `BS.isInfixOf` seen = pure seen
+      | "\r\n\r\n" `isInfixOf` seen = pure seen
       | otherwise = do
-          more <- NetBS.recv peer 4096
+          more <- recv peer 4096
           if BS.null more then pure seen else readHead peer (seen <> more)
     drainFrom peer = do
-      more <- NetBS.recv peer 4096
+      more <- recv peer 4096
       if BS.null more then pure () else drainFrom peer
     keyOf request =
-      BS8.strip . BS.takeWhile (/= 13) . BS.drop 18 . snd $ BS.breakSubstring "Sec-WebSocket-Key:" request
+      strip . BS.takeWhile (/= 13) . BS.drop 18 . snd $ breakSubstring "Sec-WebSocket-Key:" request
 
 -- | The answer that accepts the upgrade, then these frames.
 accepting :: [Frame] -> ByteString -> [ByteString]
@@ -315,11 +349,11 @@ chosen =
             , Frame True BinaryFrame "\1\2"
             ]
       (_, received) <- withRawServer (accepting sent) $ \settings ->
-        withConnection settings (Stream.toList . messages)
+        withConnection settings (toList . messages)
       received @?= [TextMessage "Hello, world", BinaryMessage "\1\2"]
   , testCase "a server that goes without closing ends the messages" $ do
       (_, received) <- withRawServer (accepting [Frame True TextFrame "only"]) $ \settings ->
-        withConnection settings (Stream.toList . messages)
+        withConnection settings (toList . messages)
       received @?= [TextMessage "only"]
   , testCase "the server refuses: another status, a wrong proof, no upgrade, an extension, an endless answer" $ do
       refused (const ["HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"])
@@ -352,9 +386,9 @@ chosen =
       tooLarge [Frame True BinaryFrame "12345678901"]
       tooLarge [Frame False BinaryFrame "123456", Frame True Continuation "78901"]
   , testCase "a server that accepts and never answers the upgrade" $
-      bracket listening Net.close $ \listener -> do
-        port <- Net.socketPort listener
-        let hold = bracket (fst <$> Net.accept listener) Net.close (\_ -> threadDelay 10_000_000)
+      bracket listening N.close $ \listener -> do
+        port <- socketPort listener
+        let hold = bracket (fst <$> accept listener) N.close (\_ -> threadDelay 10_000_000)
         withAsync hold $ \_ ->
           try (withConnection (config "127.0.0.1" (fromIntegral port) "/") {openTimeout = Just 150_000} (\_ -> pure ())) >>= (@?= Left OpenTimedOut)
   , testCase "a path that cannot be written is refused before any connection" $
@@ -363,7 +397,7 @@ chosen =
         Left other -> assertFailure ("expected InvalidRequest, got " <> show other)
         Right () -> assertFailure "no error, expected InvalidRequest"
   , testCase "nothing listening is an IOError" $ do
-      port <- bracket listening Net.close Net.socketPort
+      port <- bracket listening N.close socketPort
       try (withConnection (config "127.0.0.1" (fromIntegral port) "/") (\_ -> pure ())) >>= \case
         Left (_ :: IOError) -> pure ()
         Right () -> assertFailure "no error, expected an IOError"
@@ -371,68 +405,68 @@ chosen =
 
 -- | Serve with a handler on a free port of the loopback interface, and
 -- run something against the port.
-withOwnServer :: (Server.Upgrade -> Connection -> IO ()) -> (Int -> IO a) -> IO a
+withOwnServer :: (WSS.Upgrade -> Connection -> IO ()) -> (Int -> IO a) -> IO a
 withOwnServer handler run =
-  bracket (Server.listen "127.0.0.1" 0) Net.close $ \listener -> do
-    port <- Net.socketPort listener
-    withAsync (Server.serveSocket listener Server.defaultServerOptions handler) $ \_ -> run (fromIntegral port)
+  bracket (WSS.listen "127.0.0.1" 0) N.close $ \listener -> do
+    port <- socketPort listener
+    withAsync (serveSocket listener defaultServerOptions handler) $ \_ -> run (fromIntegral port)
 
 -- | Send back every message received.
-echoBack :: Server.Upgrade -> Connection -> IO ()
-echoBack _ connection = Stream.fold (Fold.drainMapM (send connection)) (messages connection)
+echoBack :: WSS.Upgrade -> Connection -> IO ()
+echoBack _ connection = fold (drainMapM (send connection)) (messages connection)
 
 serving :: [TestTree]
 serving =
   [ testCase "messages of a websockets client come back, of every length form" $ do
       let sizes = [0, 125, 126, 65535, 65536, 300_000]
       received <- withOwnServer echoBack $ \port ->
-        WS.runClient "127.0.0.1" port "/" $ \connection -> do
-          WS.sendTextData connection ("héllo" :: Text.Text)
-          text <- WS.receiveData connection
-          sizesBack <- mapM (\size -> WS.sendBinaryData connection (BS.replicate size 7) >> BS.length <$> WS.receiveData connection) sizes
-          WS.sendClose connection ("" :: ByteString)
-          pure (text :: Text.Text, sizesBack)
+        runClient "127.0.0.1" port "/" $ \connection -> do
+          sendTextData connection ("héllo" :: Text)
+          text <- receiveData connection
+          sizesBack <- mapM (\size -> sendBinaryData connection (BS.replicate size 7) >> BS.length <$> receiveData connection) sizes
+          sendClose connection ("" :: ByteString)
+          pure (text :: Text, sizesBack)
       received @?= ("héllo", sizes)
   , testCase "the handler sees the path and the headers asked" $ do
       asked <- newEmptyMVar
       withOwnServer (\upgrade _ -> putMVar asked upgrade) $ \port ->
-        WS.runClientWith "127.0.0.1" port "/chat?room=1" WS.defaultConnectionOptions [("X-Extra", "yes")] (\_ -> pure ())
+        runClientWith "127.0.0.1" port "/chat?room=1" defaultConnectionOptions [("X-Extra", "yes")] (\_ -> pure ())
       upgrade <- takeMVar asked
       (upgrade.path, lookup "x-extra" upgrade.headers, lookup "host" upgrade.headers) @?= ("/chat?room=1", Just "yes", lookup "host" upgrade.headers)
-      fmap (BS.isPrefixOf "127.0.0.1") (lookup "host" upgrade.headers) @?= Just True
+      fmap (isPrefixOf "127.0.0.1") (lookup "host" upgrade.headers) @?= Just True
   , testCase "a ping of the client is answered while the server receives" $ do
       answer <- withOwnServer echoBack $ \port ->
-        WS.runClient "127.0.0.1" port "/" $ \connection -> do
-          WS.sendPing connection ("are you there" :: ByteString)
-          WS.receive connection
-      answer @?= WS.ControlMessage (WS.Pong "are you there")
+        runClient "127.0.0.1" port "/" $ \connection -> do
+          sendPing connection ("are you there" :: ByteString)
+          NWS.receive connection
+      answer @?= ControlMessage (Pong "are you there")
   , testCase "a handler that returns closes the connection in order" $ do
       outcome <- withOwnServer (\_ connection -> send connection (TextMessage "bye")) $ \port ->
-        WS.runClient "127.0.0.1" port "/" $ \connection -> do
-          first <- WS.receiveData connection
-          closed <- try (WS.receiveDataMessage connection)
-          pure (first :: Text.Text, either (\case WS.CloseRequest status _ -> Just status; _ -> Nothing) (const Nothing) closed)
+        runClient "127.0.0.1" port "/" $ \connection -> do
+          first <- receiveData connection
+          closed <- try (receiveDataMessage connection)
+          pure (first :: Text, either (\case CloseRequest status _ -> Just status; _ -> Nothing) (const Nothing) closed)
       outcome @?= ("bye", Just 1000)
   , testCase "a client that closes ends the messages of the handler" $ do
       seen <- newEmptyMVar
-      withOwnServer (\_ connection -> Stream.toList (messages connection) >>= putMVar seen) $ \port ->
-        WS.runClient "127.0.0.1" port "/" $ \connection -> do
-          WS.sendTextData connection ("one" :: Text.Text)
-          WS.sendTextData connection ("two" :: Text.Text)
-          WS.sendClose connection ("" :: ByteString)
-          void (try @WS.ConnectionException (forever (WS.receiveDataMessage connection)))
+      withOwnServer (\_ connection -> toList (messages connection) >>= putMVar seen) $ \port ->
+        runClient "127.0.0.1" port "/" $ \connection -> do
+          sendTextData connection ("one" :: Text)
+          sendTextData connection ("two" :: Text)
+          sendClose connection ("" :: ByteString)
+          void (try @ConnectionException (forever (receiveDataMessage connection)))
       takeMVar seen >>= (@?= [TextMessage "one", TextMessage "two"])
   , testCase "several clients are served at once" $ do
       answers <- withOwnServer echoBack $ \port ->
         mapConcurrently
-          ( \index -> WS.runClient "127.0.0.1" port "/" $ \connection -> do
-              WS.sendTextData connection (Text.pack (show index))
-              answer <- WS.receiveData connection
-              WS.sendClose connection ("" :: ByteString)
-              pure (answer :: Text.Text)
+          ( \index -> runClient "127.0.0.1" port "/" $ \connection -> do
+              sendTextData connection (T.pack (show index))
+              answer <- receiveData connection
+              sendClose connection ("" :: ByteString)
+              pure (answer :: Text)
           )
           [1 .. 20 :: Int]
-      answers @?= map (Text.pack . show) [1 .. 20 :: Int]
+      answers @?= map (T.pack . show) [1 .. 20 :: Int]
   ]
 
 serverSide :: [TestTree]
@@ -445,7 +479,7 @@ serverSide =
           ping connection "x"
           send connection (TextMessage "héllo")
           send connection (BinaryMessage (BS.replicate 70_000 9))
-          answers <- Stream.toList (Stream.take 2 (messages connection))
+          answers <- toList (S.take 2 (messages connection))
           pongs <- atomically (pongCount connection)
           pure (answers, pongs)
       outcome @?= ([TextMessage "héllo", BinaryMessage (BS.replicate 70_000 9)], 1)
@@ -454,18 +488,18 @@ serverSide =
       let handler _ connection = do
             ping connection ""
             -- The pong is counted while something receives.
-            withAsync (Stream.toList (messages connection)) $ \_ ->
+            withAsync (toList (messages connection)) $ \_ ->
               atomically (pongCount connection >>= check . (> 0))
             atomically (pongCount connection) >>= putMVar counted
       received <- withOwnServer handler $ \port ->
-        withConnection (config "127.0.0.1" port "/") (Stream.toList . messages)
+        withConnection (config "127.0.0.1" port "/") (toList . messages)
       takeMVar counted >>= (@?= 1)
       received @?= []
   , testCase "what does not ask for a WebSocket is answered 400, and the server goes on" $ do
       (answers, served) <- withOwnServer echoBack $ \port -> do
-        let talk request = bracket (connect "127.0.0.1" port) Net.close $ \socket -> do
-              NetBS.sendAll socket request
-              NetBS.recv socket 4096
+        let talk request = bracket (connect "127.0.0.1" port) N.close $ \socket -> do
+              sendAll socket request
+              recv socket 4096
         plain <- talk "GET / HTTP/1.1\r\nHost: x\r\n\r\n"
         notHttp <- talk "SSH-2.0-OpenSSH\r\n\r\n"
         oldVersion <- talk "GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 8\r\n\r\n"
@@ -476,20 +510,20 @@ serverSide =
   , testCase "the answer to a proper request, and a frame that is not masked" $ do
       outcome <- newEmptyMVar
       answer <- withOwnServer (\_ connection -> try (receive connection) >>= putMVar outcome) $ \port ->
-        bracket (connect "127.0.0.1" port) Net.close $ \socket -> do
-          NetBS.sendAll socket "GET /x HTTP/1.1\r\nHost: x\r\nUpgrade: WebSocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
-          answer <- NetBS.recv socket 4096
-          NetBS.sendAll socket (encodeFrame Nothing (Frame True TextFrame "not masked"))
+        bracket (connect "127.0.0.1" port) N.close $ \socket -> do
+          sendAll socket "GET /x HTTP/1.1\r\nHost: x\r\nUpgrade: WebSocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+          answer <- recv socket 4096
+          sendAll socket (encodeFrame Nothing (Frame True TextFrame "not masked"))
           takeMVar outcome >>= \case
             Left (ProtocolViolation _) -> pure ()
             other -> assertFailure ("expected ProtocolViolation, got " <> show other)
           pure answer
       answer @?= "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"
   , testCase "a client that never sends its request" $
-      bracket (Server.listen "127.0.0.1" 0) Net.close $ \listener -> do
-        port <- Net.socketPort listener
-        let silent = bracket (connect "127.0.0.1" (fromIntegral port)) Net.close (\_ -> threadDelay 10_000_000)
+      bracket (WSS.listen "127.0.0.1" 0) N.close $ \listener -> do
+        port <- socketPort listener
+        let silent = bracket (connect "127.0.0.1" (fromIntegral port)) N.close (\_ -> threadDelay 10_000_000)
         withAsync silent $ \_ ->
-          bracket (fst <$> Net.accept listener) Net.close $ \peer ->
-            try (Server.acceptOver (socketTransport peer) Server.defaultServerOptions {Server.openTimeout = Just 150_000} (\_ _ -> pure ())) >>= (@?= Left OpenTimedOut)
+          bracket (fst <$> accept listener) N.close $ \peer ->
+            try (acceptOver (socketTransport peer) defaultServerOptions {WSS.openTimeout = Just 150_000} (\_ _ -> pure ())) >>= (@?= Left OpenTimedOut)
   ]

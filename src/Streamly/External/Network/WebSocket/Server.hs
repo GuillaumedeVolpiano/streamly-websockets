@@ -7,14 +7,15 @@
 -- exchanging messages over the same 'Connection' as a client does.
 --
 -- > {-# LANGUAGE OverloadedStrings #-}
--- > import Streamly.Data.Fold qualified as Fold
--- > import Streamly.Data.Stream qualified as Stream
--- > import Streamly.External.Network.WebSocket.Server
+-- > import Streamly.Data.Fold (drainMapM)
+-- > import Streamly.Data.Stream (fold)
+-- > import Streamly.External.Network.WebSocket.Server (defaultServerOptions,
+-- >                                                    messages, send, serve)
 -- >
 -- > -- Send back what is received.
 -- > main :: IO ()
 -- > main = serve "127.0.0.1" 8080 defaultServerOptions $ \\_ connection ->
--- >   Stream.fold (Fold.drainMapM (send connection)) (messages connection)
+-- >   fold (drainMapM (send connection)) (messages connection)
 --
 -- Every upgrade asked properly is accepted, whatever its path: a handler
 -- that does not want a client closes its connection. There is no TLS
@@ -48,15 +49,23 @@ module Streamly.External.Network.WebSocket.Server
 import Control.Exception (SomeException, bracket, catch, throwIO, try)
 import Control.Monad (void)
 import Data.ByteString (ByteString)
-import Network.Socket qualified as Net
-import Streamly.Data.StreamK qualified as StreamK
-import Streamly.External.ByteString qualified as StreamlyBS
-import Streamly.External.Network.HTTP (HttpError, Transport (..), socketTransport)
+import Network.Socket (Socket, SocketOption (NoDelay), setSocketOption)
+import Network.Socket qualified as N (close)
+import Streamly.Data.StreamK (fromStream)
+import Streamly.External.ByteString (toArray)
+import Streamly.External.Network.HTTP (HttpError, Transport (..),
+                                       socketTransport)
+import Streamly.External.Network.HTTP.Wire (Header, RequestHead (..),
+                                            readRequestHeadWithin)
 import Streamly.External.Network.TCP (listen, serveConnections)
-import Streamly.External.Network.HTTP.Wire (Header, RequestHead (..), readRequestHeadWithin)
-import Streamly.External.Network.WebSocket.Connection
-import Streamly.External.Network.WebSocket.Frame (Side (..), WebSocketError (..))
-import Streamly.External.Network.WebSocket.Handshake (checkUpgradeRequest, refusal, upgradeResponse)
+import Streamly.External.Network.WebSocket.Connection (Connection, Message (..),
+                                                       close, established,
+                                                       messages, ping,
+                                                       pongCount, receive, send)
+import Streamly.External.Network.WebSocket.Frame (Side (..),
+                                                  WebSocketError (..))
+import Streamly.External.Network.WebSocket.Handshake (checkUpgradeRequest,
+                                                      refusal, upgradeResponse)
 import System.Timeout (timeout)
 
 -- | The bounds of the connections of a server.
@@ -89,13 +98,13 @@ data Upgrade = Upgrade
 -- | Listen on an address and a port, and serve every client with a
 -- handler, each in a thread of its own, without end. See 'serveSocket'.
 serve :: String -> Int -> ServerOptions -> (Upgrade -> Connection -> IO ()) -> IO ()
-serve host port options handler = bracket (listen host port) Net.close (\listener -> serveSocket listener options handler)
+serve host port options handler = bracket (listen host port) N.close (\listener -> serveSocket listener options handler)
 
 -- | Serve every client that connects to a listening socket, each in a
 -- thread of its own, without end. The connection of a client is closed
 -- when its handler returns or throws; what a handler throws, and a client
 -- whose request is refused, end that client only and are not reported.
-serveSocket :: Net.Socket -> ServerOptions -> (Upgrade -> Connection -> IO ()) -> IO ()
+serveSocket :: Socket -> ServerOptions -> (Upgrade -> Connection -> IO ()) -> IO ()
 serveSocket listener options handler = serveSocketWith listener $ \peer ->
   acceptOver (socketTransport peer) options handler
 
@@ -103,10 +112,10 @@ serveSocket listener options handler = serveSocketWith listener $ \peer ->
 -- connection of each client: a server over TLS does its handshake there,
 -- then calls 'acceptOver' with the transport it got. The connection is
 -- closed when the function returns or throws.
-serveSocketWith :: Net.Socket -> (Net.Socket -> IO ()) -> IO ()
+serveSocketWith :: Socket -> (Socket -> IO ()) -> IO ()
 serveSocketWith listener client = serveConnections listener $ \peer -> do
   -- Frames are small and wait for answers: do not hold them back.
-  Net.setSocketOption peer Net.NoDelay 1
+  setSocketOption peer NoDelay 1
   client peer
 
 -- | Accept the upgrade asked on a connection that is already open, and
@@ -120,16 +129,16 @@ acceptOver :: Transport -> ServerOptions -> (Upgrade -> Connection -> IO a) -> I
 acceptOver transport options use = do
   (request, rest) <- opening $
     -- No request for an upgrade needs more than this.
-    readRequestHeadWithin (Just 65536) (StreamK.fromStream transport.receive)
+    readRequestHeadWithin (Just 65536) (fromStream transport.receive)
       `catch` \(problem :: HttpError) -> refuse (HandshakeFailed (show problem))
   key <- either refuse pure (checkUpgradeRequest request)
-  transport.send (StreamlyBS.toArray (upgradeResponse key))
+  transport.send (toArray (upgradeResponse key))
   let RequestHead _ path headers = request
   established Server transport rest options.maxMessageSize options.closeTimeout (use Upgrade {path, headers})
   where
     refuse :: WebSocketError -> IO b
     refuse problem = do
-      void (try @SomeException (transport.send (StreamlyBS.toArray refusal)))
+      void (try @SomeException (transport.send (toArray refusal)))
       throwIO problem
     opening action = case options.openTimeout of
       Nothing -> action

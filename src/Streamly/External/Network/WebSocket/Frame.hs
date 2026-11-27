@@ -26,17 +26,17 @@ module Streamly.External.Network.WebSocket.Frame
 import Control.Exception (Exception, throwIO)
 import Control.Monad (when)
 import Data.Bits (shiftR, testBit, xor, (.&.), (.|.))
-import Data.ByteString (ByteString)
-import Data.ByteString qualified as BS
-import Data.ByteString.Unsafe qualified as BS (unsafeIndex)
+import Data.ByteString (ByteString, mapAccumL, pack)
+import Data.ByteString qualified as BS (concat, length, splitAt)
+import Data.ByteString.Unsafe (unsafeIndex)
 import Data.Word (Word8)
-import FlatParse.Basic qualified as FP
+import FlatParse.Basic (Parser, anyWord16be, anyWord64be, anyWord8, err)
+import FlatParse.Basic qualified as FB (take)
 import Streamly.Data.Array (Array)
-import Streamly.Data.Array qualified as Array
-import Streamly.Data.StreamK (StreamK)
-import Streamly.Data.StreamK qualified as StreamK
-import Streamly.External.ByteString qualified as StreamlyBS
-import Streamly.External.FlatParse qualified as Flat
+import Streamly.Data.Array qualified as A (length)
+import Streamly.Data.StreamK (StreamK, cons, uncons)
+import Streamly.External.ByteString (fromArray, toArray)
+import Streamly.External.FlatParse (ParseError (ParserError), parseBreak)
 
 -- | What a frame carries.
 data Opcode
@@ -88,7 +88,7 @@ instance Exception WebSocketError
 encodeFrame :: Maybe ByteString -> Frame -> ByteString
 encodeFrame mask frame =
   BS.concat $
-    [BS.pack (first : lengthBytes)]
+    [pack (first : lengthBytes)]
       <> maybe [frame.payload] (\key -> [key, applyMask key frame.payload]) mask
   where
     first = (if frame.final then 0x80 else 0) .|. opcodeNumber frame.opcode
@@ -116,7 +116,7 @@ opcodeNumber = \case
 applyMask :: ByteString -> ByteString -> ByteString
 applyMask key
   | BS.length key /= 4 = id
-  | otherwise = snd . BS.mapAccumL (\index byte -> (index + 1, byte `xor` BS.unsafeIndex key (index .&. 3))) (0 :: Int)
+  | otherwise = snd . mapAccumL (\index byte -> (index + 1, byte `xor` unsafeIndex key (index .&. 3))) (0 :: Int)
 
 -- | What precedes the payload of a frame.
 data FrameHeader = FrameHeader
@@ -134,10 +134,10 @@ data FrameHeader = FrameHeader
 -- can mend. Refuses reserved bits (no extension is
 -- negotiated), unknown opcodes, lengths not written in the shortest form,
 -- and control frames that are fragmented or longer than 125 bytes.
-frameHeader :: FP.Parser String FrameHeader
+frameHeader :: Parser String FrameHeader
 frameHeader = do
-  first <- FP.anyWord8
-  when (first .&. 0x70 /= 0) (FP.err "a reserved bit is set")
+  first <- anyWord8
+  when (first .&. 0x70 /= 0) (err "a reserved bit is set")
   opcode <- case first .&. 0x0F of
     0 -> pure Continuation
     1 -> pure TextFrame
@@ -145,23 +145,23 @@ frameHeader = do
     8 -> pure CloseFrame
     9 -> pure PingFrame
     10 -> pure PongFrame
-    other -> FP.err ("unknown opcode " <> show other)
-  second <- FP.anyWord8
+    other -> err ("unknown opcode " <> show other)
+  second <- anyWord8
   let final = testBit first 7
   size <- case second .&. 0x7F of
     126 -> do
-      long <- FP.anyWord16be
-      when (long < 126) (FP.err "a length not in its shortest form")
+      long <- anyWord16be
+      when (long < 126) (err "a length not in its shortest form")
       pure (fromIntegral long)
     127 -> do
-      long <- FP.anyWord64be
-      when (long < 65536) (FP.err "a length not in its shortest form")
-      when (long > fromIntegral (maxBound :: Int)) (FP.err "a length beyond what can be held")
+      long <- anyWord64be
+      when (long < 65536) (err "a length not in its shortest form")
+      when (long > fromIntegral (maxBound :: Int)) (err "a length beyond what can be held")
       pure (fromIntegral long)
     short -> pure (fromIntegral short)
-  when (isControl opcode && not final) (FP.err "a fragmented control frame")
-  when (isControl opcode && size > 125) (FP.err "a control frame longer than 125 bytes")
-  mask <- if testBit second 7 then Just <$> FP.take 4 else pure Nothing
+  when (isControl opcode && not final) (err "a fragmented control frame")
+  when (isControl opcode && size > 125) (err "a control frame longer than 125 bytes")
+  mask <- if testBit second 7 then Just <$> FB.take 4 else pure Nothing
   pure FrameHeader {final, opcode, mask, size}
 
 -- | The two ends of a connection. A client masks the frames it sends; a
@@ -180,16 +180,16 @@ data Side = Client | Server
 -- ends inside the frame; 'MessageTooLarge' for a payload beyond the limit.
 readFrame :: Side -> Int -> StreamK IO (Array Word8) -> IO (Maybe (Frame, StreamK IO (Array Word8)))
 readFrame side limit input =
-  StreamK.uncons input >>= \case
+  uncons input >>= \case
     Nothing -> pure Nothing
     Just (array, rest)
-      | Array.length array == 0 -> readFrame side limit rest
+      | A.length array == 0 -> readFrame side limit rest
       | otherwise -> do
           -- A header is fourteen bytes at most.
-          (outcome, afterHeader) <- Flat.parseBreak 14 frameHeader (StreamK.cons array rest)
+          (outcome, afterHeader) <- parseBreak 14 frameHeader (cons array rest)
           found <- case outcome of
             Right found -> pure found
-            Left (Flat.ParserError problem) -> throwIO (ProtocolViolation problem)
+            Left (ParserError problem) -> throwIO (ProtocolViolation problem)
             Left _ -> throwIO (ProtocolViolation "the connection ended inside the header of a frame")
           case (side, found.mask) of
             (Client, Just _) -> throwIO (ProtocolViolation "a masked frame from the server")
@@ -209,12 +209,12 @@ takeBytes = go []
   where
     go taken 0 input = pure (Just (BS.concat (reverse taken), input))
     go taken remaining input =
-      StreamK.uncons input >>= \case
+      uncons input >>= \case
         Nothing -> pure Nothing
         Just (array, rest)
           | BS.length bytes <= remaining -> go (bytes : taken) (remaining - BS.length bytes) rest
           | otherwise ->
               let (front, back) = BS.splitAt remaining bytes
-               in pure (Just (BS.concat (reverse (front : taken)), StreamK.cons (StreamlyBS.toArray back) rest))
+               in pure (Just (BS.concat (reverse (front : taken)), cons (toArray back) rest))
           where
-            bytes = StreamlyBS.fromArray array
+            bytes = fromArray array
