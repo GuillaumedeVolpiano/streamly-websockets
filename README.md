@@ -3,8 +3,8 @@
 WebSockets (RFC 6455) written with
 [Streamly](https://streamly.composewell.com/), over plain TCP, for clients
 and for servers. The opening handshake goes through
-[streamly-http](https://github.com/GuillaumedeVolpiano/streamly-http);
-frames are read with Streamly parsers from the stream of byte arrays of the
+[streamly-http](https://hackage.haskell.org/package/streamly-http);
+frames are read with flatparse parsers from the stream of byte arrays of the
 connection; the messages received are a stream.
 
 A client:
@@ -70,6 +70,9 @@ main = serve "127.0.0.1" 8080 defaultServerOptions $ \_ connection ->
 
 ## Building
 
-The libraries this package is built on are not on Hackage yet:
-`cabal.project` fetches them from GitHub, at their releases. To build against copies checked out next to
-this repository instead, pass `--project-file=cabal.project.siblings`.
+To build against copies of the libraries this package is built on
+([streamly-http](https://hackage.haskell.org/package/streamly-http),
+[streamly-network-tcp](https://hackage.haskell.org/package/streamly-network-tcp),
+[streamly-flatparse](https://hackage.haskell.org/package/streamly-flatparse))
+checked out next to this repository, pass
+`--project-file=cabal.project.siblings`.
