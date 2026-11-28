@@ -1,43 +1,14 @@
 # Revision history for streamly-websockets
 
-## 0.3.0.2 -- 2026-11-27
+## 0.1.0.0 -- 2026-11-28
 
-* No change of interface. The dependency bounds are stated once in the
-  cabal file, and the imports list the names they use.
-* The examples of the documentation import the names they use; each was
-  typechecked.
-
-## 0.3.0.1 -- 2026-11-27
-
-* Builds with GHC 9.8 and 9.10 as well as 9.12: the language is GHC2021
-  with the extensions GHC2024 adds, and the bounds on `base` and on the
-  libraries that come with the compiler are wider.
-* The links of the documentation say which name they mean, where a type
-  and its constructor, or two modules, share one.
-
-## 0.3.0.0 -- 2026-11-21
-
-* The header of a frame is a flatparse parser, run through
-  streamly-flatparse: `frameHeader` changes its type.
-* Built on streamly-http 0.3.
-
-## 0.2.0.0 -- 2026-11-21
-
-* `openTimeout` in `Config`: thirty seconds by default for the TCP
-  connection and the answer to the upgrade, `OpenTimedOut` beyond.
-* The side of a server: `Streamly.External.Network.WebSocket.Server`,
-  with `serve`, `listen`, `serveSocket`, `serveSocketWith` and
-  `acceptOver`. A connection is the same type on both sides.
-* `readFrame` takes the side that reads: a server unmasks the frames of a
-  client and refuses those that are not masked.
-* The answer to the upgrade is at most 64 KiB.
-* `listen` and the accept loop come from streamly-network-tcp.
-* Built on streamly-http 0.2.
-
-## 0.1.0.0 -- 2026-11-21
-
+* First release on Hackage.
 * A WebSocket client over TCP: `withConnection`, `send`, `receive`,
-  `messages`, `ping`, `pongCount`, `close`; `withConnectionOver` for a
-  connection of the caller, such as a TLS one.
-* Frames written and read (`Frame`), and the opening handshake
-  (`Handshake`) over streamly-http.
+  `messages`, `ping`, `pongCount`, `close`, within a time to open
+  (`openTimeout`); `withConnectionOver` for a connection of the caller,
+  such as a TLS one.
+* The side of a server (`Streamly.External.Network.WebSocket.Server`):
+  `serve`, `listen`, `serveSocket`, `serveSocketWith` and `acceptOver`. A
+  connection is the same type on both sides.
+* Frames written and read (`Frame`), their headers with a flatparse
+  parser, and the opening handshake (`Handshake`) over streamly-http.
